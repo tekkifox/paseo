@@ -42,3 +42,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            GIT_HASH=${{ github.sha }}
+
+      - name: Trigger Portainer webhook
+        if: github.ref == 'refs/heads/main'
+        run: |
+          curl -fsSL --retry 3 \
+            -X POST \
+            -H "Accept: application/json" \
+            "${{ secrets.PORTAINER_WEBHOOK_URL }}"
