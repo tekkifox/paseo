@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y curl gpg && \
     apt-get install -y gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /workspace && mkdir -p ~/.ssh && \
-    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts
+RUN ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts
+RUN echo "GlobalKnownHostsFile /etc/ssh/ssh_known_hosts" >> /etc/ssh/ssh_config
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 USER developer
