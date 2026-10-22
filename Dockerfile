@@ -1,7 +1,12 @@
 FROM ghcr.io/getpaseo/paseo:latest
 
+ARG OPENCODE_VERSION=latest
+
+WORKDIR /workspace
+
 USER root
-RUN npm install -g @openai/codex @anthropic-ai/claude-code opencode-ai
+RUN npm install -g --unsafe-perm @opencode/cli@${OPENCODE_VERSION}
+RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 
 RUN apt-get update && apt-get install -y curl gpg && \
@@ -25,3 +30,6 @@ RUN chmod 755 /etc/ssh/ssh_config
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 USER developer
+
+# Enable TUI interactivity
+ENV TERM=xterm-256color
