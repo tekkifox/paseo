@@ -2,6 +2,7 @@ FROM ghcr.io/getpaseo/paseo:latest
 
 USER root
 RUN npm install -g @openai/codex @anthropic-ai/claude-code opencode-ai
+RUN npm install -g @github/copilot
 
 RUN apt-get update && apt-get install -y curl gpg && \
     mkdir -p -m 755 /etc/apt/keyrings && \
