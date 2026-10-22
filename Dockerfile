@@ -12,8 +12,15 @@ RUN apt-get update && apt-get install -y curl gpg && \
     apt-get install -y gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /etc/ssh/ssh_known_hosts
-RUN echo "GlobalKnownHostsFile /etc/ssh/ssh_known_hosts" >> /etc/ssh/ssh_config
+# Setup system-wide rules for GitHub connections
+RUN mkdir -p /etc/ssh && \
+    echo "Host github.com" >> /etc/ssh/ssh_config && \
+    echo "    IdentityFile /workspace/mounted_keys/id_rsa" >> /etc/ssh/ssh_config && \
+    echo "    StrictHostKeyChecking no" >> /etc/ssh/ssh_config && \
+    echo "    IdentitiesOnly yes" >> /etc/ssh/ssh_config
+
+# Ensure whatever random runtime user spins up can actually read the mounted path
+RUN chmod 755 /etc/ssh/ssh_config
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 USER developer
