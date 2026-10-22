@@ -11,3 +11,6 @@ RUN apt-get update && apt-get install -y curl gpg && \
     apt-get update && \
     apt-get install -y gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -u 1001 -m -s /bin/bash developer
+USER developer
