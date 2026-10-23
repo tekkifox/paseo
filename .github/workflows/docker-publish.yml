@@ -80,9 +80,11 @@ jobs:
               -X POST \
               -H "Accept: application/json" \
               "${urls[$i]}"; then
-              echo "::error::Portainer webhook #$((i + 1)) failed"
+              echo "::warning::Portainer webhook #$((i + 1)) failed"
               failed=$((failed + 1))
             fi
           done
 
-          exit "$failed"
+          if [ "$failed" -gt 0 ]; then
+            echo "::warning::$failed of ${#urls[@]} Portainer webhook(s) failed; continuing."
+          fi
