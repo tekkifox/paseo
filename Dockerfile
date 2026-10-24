@@ -8,6 +8,7 @@ USER root
 RUN npm install -g --unsafe-perm @opencode/cli@${OPENCODE_VERSION}
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
+RUN npm install -g pnpm@10.11.0 && pnpm --version
 
 RUN apt-get update && apt-get install -y curl gpg unzip python3 libreoffice && \
     mkdir -p -m 755 /etc/apt/keyrings && \
