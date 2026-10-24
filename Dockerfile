@@ -9,7 +9,7 @@ RUN npm install -g --unsafe-perm @opencode/cli@${OPENCODE_VERSION}
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 
-RUN apt-get update && apt-get install -y curl gpg unzip python3 && \
+RUN apt-get update && apt-get install -y curl gpg unzip python3 libreoffice && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
