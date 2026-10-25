@@ -3,12 +3,13 @@ services:
     build: .
     image: ghcr.io/getpaseo/paseo:latest
     # Compose (standalone) limits
-    cpus: 1.0
-    mem_limit: 1g
-    memswap_limit: 1g
+    # Cap at 3.5 CPUs (just under 90% of the host's 4 cores)
+    cpus: "3.5"
+    mem_limit: 7g
+    memswap_limit: 7g
     # Swarm / Portainer stack limits (ignored by plain `docker compose up`)
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 1g
+          cpus: "3.5"
+          memory: 7g
