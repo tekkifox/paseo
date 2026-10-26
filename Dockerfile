@@ -2,6 +2,7 @@ FROM ghcr.io/getpaseo/paseo:latest
 
 ARG OPENCODE_VERSION=latest
 ARG GO_VERSION=1.27.3
+ARG VERCEL_CLI_VERSION=65.2.0
 
 WORKDIR /workspace
 
@@ -11,6 +12,7 @@ RUN npm install -g pnpm
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g pnpm@10.11.0 && pnpm --version
+RUN npm install -g vercel@${VERCEL_CLI_VERSION}
 
 RUN apt-get update && apt-get install -y curl gpg unzip python3 make git && \
     mkdir -p -m 755 /etc/apt/keyrings && \
