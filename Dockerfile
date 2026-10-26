@@ -1,6 +1,7 @@
 FROM ghcr.io/getpaseo/paseo:latest
 
 ARG OPENCODE_VERSION=latest
+ARG GO_VERSION=1.27.3
 
 WORKDIR /workspace
 
@@ -11,7 +12,7 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g pnpm@10.11.0 && pnpm --version
 
-RUN apt-get update && apt-get install -y curl gpg unzip python3 && \
+RUN apt-get update && apt-get install -y curl gpg unzip python3 make git && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -19,6 +20,15 @@ RUN apt-get update && apt-get install -y curl gpg unzip python3 && \
     apt-get update && \
     apt-get install -y gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install a pinned Go toolchain from the official tarball. The architecture
+# matches Go's own naming (amd64/arm64), so dpkg's value is used directly.
+RUN curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm /tmp/go.tar.gz && \
+    /usr/local/go/bin/go version
+
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN curl -fsSL https://composio.dev/install | sh
 
