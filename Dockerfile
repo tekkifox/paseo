@@ -6,6 +6,7 @@ WORKDIR /workspace
 
 USER root
 RUN npm install -g --unsafe-perm @opencode/cli@${OPENCODE_VERSION}
+RUN npm install -g pnpm
 RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g pnpm@10.11.0 && pnpm --version
@@ -33,6 +34,12 @@ RUN chmod 755 /etc/ssh/ssh_config
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 USER developer
+
+# Put the developer user's local bin (where lopper installs) on PATH
+ENV PATH="/home/developer/.local/bin:${PATH}"
+
+RUN curl -fsSL https://lopper.dev/install.sh | LOPPER_INSTALL_DIR=/home/developer/.local/bin sh && \
+    lopper --version
 
 # Enable TUI interactivity
 ENV TERM=xterm-256color
