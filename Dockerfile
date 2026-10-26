@@ -44,6 +44,42 @@ RUN mkdir -p /etc/ssh && \
 # Ensure whatever random runtime user spins up can actually read the mounted path
 RUN chmod 755 /etc/ssh/ssh_config
 
+# Visual verification tooling: Playwright's Chromium runtime libraries (the
+# Debian 12 set that `playwright install-deps` uses, plus the X11/vulkan extras
+# Chromium dlopens), real fonts so text does not render as boxes, ImageMagick
+# for `compare`/`convert` screenshot diffs, and Pillow (python3-pil) for
+# Python-based image work.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libnss3 \
+        libnspr4 \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libatspi2.0-0 \
+        libcups2 \
+        libdrm2 \
+        libdbus-1-3 \
+        libxkbcommon0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxrandr2 \
+        libgbm1 \
+        libpango-1.0-0 \
+        libcairo2 \
+        libasound2 \
+        libx11-6 \
+        libxcb1 \
+        libxext6 \
+        libxi6 \
+        libxtst6 \
+        libxss1 \
+        libvulkan1 \
+        fonts-liberation \
+        imagemagick \
+        python3-pil && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 RUN useradd -u 1001 -m -s /bin/bash developer
 USER developer
 
