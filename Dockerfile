@@ -11,7 +11,7 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g pnpm@10.11.0 && pnpm --version
 
-RUN apt-get update && apt-get install -y curl gpg unzip python3 libreoffice && \
+RUN apt-get update && apt-get install -y curl gpg unzip python3 && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
