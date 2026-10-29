@@ -40,7 +40,7 @@ jobs:
       # digests into the tagged multi-arch manifest.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -106,7 +106,7 @@ jobs:
       # digests into the tagged multi-arch manifest.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/arm64
