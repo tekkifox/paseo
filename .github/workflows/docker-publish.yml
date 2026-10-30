@@ -9,7 +9,7 @@ permissions:
   packages: write
 
 jobs:
-  build-amd64:
+  build:
     name: Build (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -46,8 +46,8 @@ jobs:
           platforms: linux/amd64
           outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=build-amd64
-          cache-to: type=gha,mode=max,scope=build-amd64
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
           build-args: |
             GIT_HASH=${{ github.sha }}
 
@@ -60,24 +60,22 @@ jobs:
             echo "::error::Build produced no digest"
             exit 1
           fi
-          mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+          mkdir -p "${RUNNER_TEMP}/digest"
+          printf '%s\n' "${DIGEST}" > "${RUNNER_TEMP}/digest/digest"
 
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
           name: digest-amd64
-          path: ${{ runner.temp }}/digests/*
+          path: ${{ runner.temp }}/digest/digest
           if-no-files-found: error
           retention-days: 1
 
   build-arm64:
     name: Build (arm64)
-    # Native arm64 build on the VPS. This requires a self-hosted runner with
-    # all three labels; see RUNNER.md. If no runner is registered the job
-    # stays queued indefinitely (timeout-minutes does not count queue time)
-    # and the merge job never runs.
-    runs-on: [self-hosted, linux, arm64]
+    # GitHub-hosted native arm64 runner. This repository is public, so the
+    # runner is available at no cost.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     steps:
       - name: Checkout repository
@@ -109,12 +107,11 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/arm64
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=build-arm64
-          cache-to: type=gha,mode=max,scope=build-arm64
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
           build-args: |
             GIT_HASH=${{ github.sha }}
 
@@ -127,29 +124,31 @@ jobs:
             echo "::error::Build produced no digest"
             exit 1
           fi
-          mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+          mkdir -p "${RUNNER_TEMP}/digest"
+          printf '%s\n' "${DIGEST}" > "${RUNNER_TEMP}/digest/digest"
 
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
           name: digest-arm64
-          path: ${{ runner.temp }}/digests/*
+          path: ${{ runner.temp }}/digest/digest
           if-no-files-found: error
           retention-days: 1
 
   merge:
     name: Merge manifests
-    needs: [build-amd64, build-arm64]
+    needs: [build, build-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Each build artifact contains a single one-line `digest` file. Keeping
+      # the artifacts in separate directories makes it unambiguous which
+      # digest belongs to which architecture.
       - name: Download digests
         uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
-          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -173,24 +172,36 @@ jobs:
       - name: Create manifest list and push
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+          AMD64_DIGEST_FILE: ${{ runner.temp }}/digests/digest-amd64/digest
+          ARM64_DIGEST_FILE: ${{ runner.temp }}/digests/digest-arm64/digest
         run: |
           set -euo pipefail
-          cd "${RUNNER_TEMP}/digests"
-          shopt -s nullglob
-          digests=(*)
-          if [ "${#digests[@]}" -ne 2 ]; then
-            echo "::error::Expected 2 digests (amd64, arm64), found ${#digests[@]}"
-            exit 1
-          fi
 
-          mapfile -t tags < <(jq -r '.tags[]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          for file in "${AMD64_DIGEST_FILE}" "${ARM64_DIGEST_FILE}"; do
+            if [ ! -s "${file}" ]; then
+              echo "::error::Missing digest file: ${file}"
+              exit 1
+            fi
+          done
+
+          amd64="$(tr -d '[:space:]' < "${AMD64_DIGEST_FILE}")"
+          arm64="$(tr -d '[:space:]' < "${ARM64_DIGEST_FILE}")"
+          for digest in "${amd64}" "${arm64}"; do
+            case "${digest}" in
+              sha256:*) ;;
+              *)
+                echo "::error::Unexpected digest format: ${digest}"
+                exit 1
+                ;;
+            esac
+          done
+
           args=()
-          for tag in "${tags[@]}"; do
+          while IFS= read -r tag; do
             args+=(-t "${tag}")
-          done
-          for digest in "${digests[@]}"; do
-            args+=("ghcr.io/${{ github.repository }}@sha256:${digest}")
-          done
+          done < <(jq -r '.tags[]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          args+=("ghcr.io/${{ github.repository }}@${amd64}")
+          args+=("ghcr.io/${{ github.repository }}@${arm64}")
 
           docker buildx imagetools create "${args[@]}"
 
@@ -202,7 +213,7 @@ jobs:
       # PORTAINER_WEBHOOK_URL variable is still supported. This runs after the
       # manifest is written so Portainer never pulls a half-published tag.
       - name: Trigger Portainer webhooks
-        if: github.ref == 'refs/heads/main'
+        if: success() && github.ref == 'refs/heads/main'
         env:
           PORTAINER_WEBHOOK_URL: ${{ vars.PORTAINER_WEBHOOK_URL }}
           PORTAINER_WEBHOOK_URLS: ${{ vars.PORTAINER_WEBHOOK_URLS }}
