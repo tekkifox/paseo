@@ -75,7 +75,7 @@ jobs:
     name: Build (arm64)
     # GitHub-hosted native arm64 runner. This repository is public, so the
     # runner is available at no cost.
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 180
     steps:
       - name: Checkout repository
