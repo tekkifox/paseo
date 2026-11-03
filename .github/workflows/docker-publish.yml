@@ -270,6 +270,21 @@ jobs:
             printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].ImageID // empty'
           }
 
+          get_paseo_big_container_id() {
+            local resp status body
+            resp=$(curl -sS -w "\n%{http_code}" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}" \
+              "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
+            status=$(printf '%s\n' "$resp" | tail -n 1)
+            body=$(printf '%s\n' "$resp" | sed '$d')
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Portainer GET /api/endpoints/${endpoint_id}/docker/containers/json failed with HTTP status ${status}" >&2
+              printf '%s\n' "$body" >&2
+              return 1
+            fi
+            printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].Id // empty'
+          }
+
           old_image=$(get_paseo_big_image)
           if [ -z "$old_image" ]; then
             echo "Could not find a running paseo-big container before redeploy"
@@ -319,11 +334,11 @@ jobs:
 
           echo "Portainer stack redeployed (PUT accepted)"
 
-          # --- Poll for paseo-big to come back with a new image id ---
-          timeout_seconds=180
-          deadline=$((SECONDS + timeout_seconds))
+          # --- Poll for paseo-big to come back with a new image id (short grace) ---
+          overall_deadline=$((SECONDS + 180))
+          grace_deadline=$((SECONDS + 30))
           new_image=""
-          while [ "$SECONDS" -lt "$deadline" ]; do
+          while [ "$SECONDS" -lt "$grace_deadline" ] && [ "$SECONDS" -lt "$overall_deadline" ]; do
             new_image=$(get_paseo_big_image) || true
             if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
               echo "paseo-big now running image: ${new_image}"
@@ -332,9 +347,58 @@ jobs:
             sleep 5
           done
 
+          # If still unchanged, force the recreate.
+          if [ -z "$new_image" ] || [ "$new_image" = "$old_image" ]; then
+            echo "Forced recreate path: Portainer PUT did not recreate paseo-big; deleting the paseo-big container and re-PUTting the stack"
+
+            container_id=$(get_paseo_big_container_id)
+            if [ -z "$container_id" ] || [ "$container_id" = "null" ]; then
+              echo "Could not identify the paseo-big container for forced recreate"
+              exit 1
+            fi
+            echo "Deleting paseo-big container ${container_id}"
+
+            del_response=$(curl -sS -w "\n%{http_code}" \
+              -X DELETE "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/${container_id}?force=true" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}")
+            del_status=$(printf '%s\n' "$del_response" | tail -n 1)
+            del_body=$(printf '%s\n' "$del_response" | sed '$d')
+            if [ "$del_status" -lt 200 ] || [ "$del_status" -ge 300 ]; then
+              echo "Portainer DELETE /api/endpoints/${endpoint_id}/docker/containers/${container_id} failed with HTTP status ${del_status}"
+              printf '%s\n' "$del_body"
+              exit 1
+            fi
+
+            # Re-issue the same stack PUT (Portainer recreates the missing container).
+            put_response=$(curl -sS -w "\n%{http_code}" \
+              -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$body")
+            put_status=$(printf '%s\n' "$put_response" | tail -n 1)
+            put_body=$(printf '%s\n' "$put_response" | sed '$d')
+            if [ "$put_status" -lt 200 ] || [ "$put_status" -ge 300 ]; then
+              echo "Portainer PUT /api/stacks/${stack_id} failed with HTTP status ${put_status}"
+              printf '%s\n' "$put_body"
+              exit 1
+            fi
+            echo "Portainer stack redeployed (PUT accepted)"
+
+            # Poll up to the remaining overall budget.
+            new_image=""
+            while [ "$SECONDS" -lt "$overall_deadline" ]; do
+              new_image=$(get_paseo_big_image) || true
+              if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
+                echo "paseo-big now running image: ${new_image}"
+                exit 0
+              fi
+              sleep 5
+            done
+          fi
+
           if [ "$new_image" = "$old_image" ]; then
-            echo "Portainer accepted the PUT but paseo-big still runs the old image (${old_image}); the container was not recreated."
+            echo "Portainer accepted the PUT but paseo-big still runs the old image (${old_image}); the container was not recreated. Last observed image: ${new_image:-<none>}"
           else
-            echo "Timed out after ${timeout_seconds}s waiting for paseo-big to come back (last image: ${new_image:-<none>})"
+            echo "Timed out after 180s waiting for paseo-big to come back (last image: ${new_image:-<none>})"
           fi
           exit 1
