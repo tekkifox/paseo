@@ -17,7 +17,7 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g vercel@${VERCEL_CLI_VERSION}
 
-RUN apt-get update && apt-get install -y curl gpg unzip python3 make git && \
+RUN apt-get update && apt-get install -y curl gpg unzip python3 python3-venv make git && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -36,6 +36,13 @@ RUN curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN curl -fsSL https://composio.dev/install | sh
+
+# Install the Oracle Cloud (OCI) CLI into a pinned virtual environment (PEP 668-safe)
+RUN python3 -m venv /opt/oci-cli && \
+    /opt/oci-cli/bin/pip install --no-cache-dir --disable-pip-version-check oci-cli==3.95.1 && \
+    ln -sf /opt/oci-cli/bin/oci /usr/local/bin/oci
+
+RUN oci --version
 
 # Setup system-wide rules for GitHub connections
 RUN mkdir -p /etc/ssh && \
