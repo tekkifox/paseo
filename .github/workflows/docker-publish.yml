@@ -290,7 +290,12 @@ jobs:
             echo "Could not find a running paseo-big container before redeploy"
             exit 1
           fi
-          echo "paseo-big currently running image: ${old_image}"
+          # Capture the container id now, while paseo-big is still running. After
+          # the first PUT the container may be stopped or recreated, so a fresh
+          # container-list lookup can come back empty and abort the forced
+          # recreate before it deletes anything.
+          old_container_id=$(get_paseo_big_container_id)
+          echo "paseo-big currently running image: ${old_image} (container ${old_container_id:-<unknown>})"
 
           # --- Read the stack's current file (preserve what is running) ---
           file_response=$(curl -sS -w "\n%{http_code}" \
@@ -351,7 +356,9 @@ jobs:
           if [ -z "$new_image" ] || [ "$new_image" = "$old_image" ]; then
             echo "Forced recreate path: Portainer PUT did not recreate paseo-big; deleting the paseo-big container and re-PUTting the stack"
 
-            container_id=$(get_paseo_big_container_id)
+            # Use the id captured before the first PUT; paseo-big is not
+            # necessarily in the running-container list at this point.
+            container_id="$old_container_id"
             if [ -z "$container_id" ] || [ "$container_id" = "null" ]; then
               echo "Could not identify the paseo-big container for forced recreate"
               exit 1
