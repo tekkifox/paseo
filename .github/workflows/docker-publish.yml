@@ -288,3 +288,134 @@ jobs:
           if [ "$failed" -gt 0 ]; then
             echo "::warning::$failed of ${#urls[@]} Portainer webhook(s) failed; continuing."
           fi
+
+  deploy:
+    name: Redeploy Portainer stack
+    runs-on: ubuntu-latest
+    needs: merge
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Redeploy stack via Portainer API
+        shell: bash
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          PORTAINER_URL="${PORTAINER_URL%/}"
+
+          # --- Find the stack by name (never hardcode Id/EndpointId) ---
+          stacks_response=$(curl -sS -w "\n%{http_code}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks")
+          stacks_status=$(printf '%s\n' "$stacks_response" | tail -n 1)
+          stacks_body=$(printf '%s\n' "$stacks_response" | sed '$d')
+
+          if [ "$stacks_status" -lt 200 ] || [ "$stacks_status" -ge 300 ]; then
+            echo "Portainer GET /api/stacks failed with HTTP status ${stacks_status}"
+            printf '%s\n' "$stacks_body"
+            exit 1
+          fi
+
+          stack_id=$(printf '%s\n' "$stacks_body" | jq -r '[.[] | select(.Name == "paseo")][0].Id // empty')
+          endpoint_id=$(printf '%s\n' "$stacks_body" | jq -r '[.[] | select(.Name == "paseo")][0].EndpointId // empty')
+          env_array=$(printf '%s\n' "$stacks_body" | jq '[.[] | select(.Name == "paseo")][0].Env // []')
+
+          if [ -z "$stack_id" ] || [ "$stack_id" = "null" ]; then
+            echo "Portainer stack named 'paseo' not found in /api/stacks"
+            printf '%s\n' "$stacks_body"
+            exit 1
+          fi
+          if [ -z "$endpoint_id" ] || [ "$endpoint_id" = "null" ]; then
+            echo "Portainer stack 'paseo' has no EndpointId"
+            printf '%s\n' "$stacks_body"
+            exit 1
+          fi
+
+          echo "Found stack 'paseo': Id=${stack_id}, EndpointId=${endpoint_id}"
+
+          # --- Capture the currently running image id of paseo-big ---
+          get_paseo_big_image() {
+            local resp status body
+            resp=$(curl -sS -w "\n%{http_code}" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}" \
+              "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
+            status=$(printf '%s\n' "$resp" | tail -n 1)
+            body=$(printf '%s\n' "$resp" | sed '$d')
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Portainer GET /api/endpoints/${endpoint_id}/docker/containers/json failed with HTTP status ${status}" >&2
+              printf '%s\n' "$body" >&2
+              return 1
+            fi
+            printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].ImageID // empty'
+          }
+
+          old_image=$(get_paseo_big_image)
+          if [ -z "$old_image" ]; then
+            echo "Could not find a running paseo-big container before redeploy"
+            exit 1
+          fi
+          echo "paseo-big currently running image: ${old_image}"
+
+          # --- Read the stack's current file (preserve what is running) ---
+          file_response=$(curl -sS -w "\n%{http_code}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            "${PORTAINER_URL}/api/stacks/${stack_id}/file")
+          file_status=$(printf '%s\n' "$file_response" | tail -n 1)
+          file_body=$(printf '%s\n' "$file_response" | sed '$d')
+
+          if [ "$file_status" -lt 200 ] || [ "$file_status" -ge 300 ]; then
+            echo "Portainer GET /api/stacks/${stack_id}/file failed with HTTP status ${file_status}"
+            printf '%s\n' "$file_body"
+            exit 1
+          fi
+
+          stack_file_content=$(printf '%s\n' "$file_body" | jq -r '.StackFileContent // empty')
+          if [ -z "$stack_file_content" ]; then
+            echo "Portainer /api/stacks/${stack_id}/file returned no StackFileContent"
+            printf '%s\n' "$file_body"
+            exit 1
+          fi
+
+          # --- PUT the unchanged file back with existing Env and PullImage ---
+          body=$(jq -n \
+            --arg compose "$stack_file_content" \
+            --argjson env "$env_array" \
+            '{StackFileContent: $compose, Env: $env, PullImage: true}')
+
+          put_response=$(curl -sS -w "\n%{http_code}" \
+            -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
+            -H "X-API-Key: ${PORTAINER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$body")
+          put_status=$(printf '%s\n' "$put_response" | tail -n 1)
+          put_body=$(printf '%s\n' "$put_response" | sed '$d')
+
+          if [ "$put_status" -lt 200 ] || [ "$put_status" -ge 300 ]; then
+            echo "Portainer PUT /api/stacks/${stack_id} failed with HTTP status ${put_status}"
+            printf '%s\n' "$put_body"
+            exit 1
+          fi
+
+          echo "Portainer stack redeployed (PUT accepted)"
+
+          # --- Poll for paseo-big to come back with a new image id ---
+          timeout_seconds=180
+          deadline=$((SECONDS + timeout_seconds))
+          new_image=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            new_image=$(get_paseo_big_image) || true
+            if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
+              echo "paseo-big now running image: ${new_image}"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          if [ "$new_image" = "$old_image" ]; then
+            echo "Portainer accepted the PUT but paseo-big still runs the old image (${old_image}); the container was not recreated."
+          else
+            echo "Timed out after ${timeout_seconds}s waiting for paseo-big to come back (last image: ${new_image:-<none>})"
+          fi
+          exit 1
