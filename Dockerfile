@@ -149,17 +149,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 
-# Install both browsers here. The base image (ghcr.io/getpaseo/paseo) ships no
-# Playwright browsers at all, so neither Chromium nor Firefox is available unless
-# we install them. Install into the user-home cache that Playwright uses by
-# default ($HOME/.cache/ms-playwright). This runs as root only because the base
-# image owns /home/paseo as `paseo`; the cache is handed to the runtime user
-# (uid 1001) afterwards.
-RUN mkdir -p /home/paseo/.cache/ms-playwright && \
-    PLAYWRIGHT_BROWSERS_PATH=/home/paseo/.cache/ms-playwright \
+# Browsers live outside $HOME because /home/paseo is a bind mount at runtime
+# and shadows the image. Install both browsers here. The base image
+# (ghcr.io/getpaseo/paseo) ships no Playwright browsers at all, so neither
+# Chromium nor Firefox is available unless we install them. Install into
+# /opt/ms-playwright so the bind mount cannot
+# shadow them; the cache is handed to the runtime user (uid 1001) afterwards.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN mkdir -p /opt/ms-playwright && \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     npm_config_cache=/tmp/playwright-npm-cache \
     npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install chromium firefox && \
-    chown -R developer:developer /home/paseo/.cache/ms-playwright && \
+    chown -R developer:developer /opt/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
 
 # Lighthouse and pa11y need a Chromium binary. Resolve the binary at build time
@@ -167,9 +168,9 @@ RUN mkdir -p /home/paseo/.cache/ms-playwright && \
 # stable path for CHROME_PATH. Use find with a bounded depth so a future
 # Playwright layout change fails loudly instead of silently breaking the build.
 RUN set -eu; \
-    chrome_count=$(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 | wc -l); \
-    [ "$chrome_count" -eq 1 ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright, found $chrome_count" >&2; find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome >&2; exit 1; }; \
-    chrome_bin=$(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 -print -quit); \
+    chrome_count=$(find /opt/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 | wc -l); \
+    [ "$chrome_count" -eq 1 ] || { echo "Expected exactly one executable Chromium binary under /opt/ms-playwright, found $chrome_count" >&2; find /opt/ms-playwright -maxdepth 5 -type f -name chrome >&2; exit 1; }; \
+    chrome_bin=$(find /opt/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 -print -quit); \
     ln -sfn "$chrome_bin" /usr/local/bin/chrome; \
     [ -x /usr/local/bin/chrome ]; \
     [ "$(readlink -f /usr/local/bin/chrome)" = "$chrome_bin" ]
