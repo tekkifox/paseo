@@ -149,26 +149,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 
-# Firefox for Playwright. Install it next to Chromium in the user-home cache
-# that Playwright uses by default ($HOME/.cache/ms-playwright), and leave
-# PLAYWRIGHT_BROWSERS_PATH unset so existing Chromium resolution is unchanged.
-# This runs as root only because the base image owns /home/paseo as `paseo`;
-# the cache is handed to the runtime user (uid 1001) afterwards.
+# Install both browsers here. The base image (ghcr.io/getpaseo/paseo) ships no
+# Playwright browsers at all, so neither Chromium nor Firefox is available unless
+# we install them. Install into the user-home cache that Playwright uses by
+# default ($HOME/.cache/ms-playwright). This runs as root only because the base
+# image owns /home/paseo as `paseo`; the cache is handed to the runtime user
+# (uid 1001) afterwards.
 RUN mkdir -p /home/paseo/.cache/ms-playwright && \
     PLAYWRIGHT_BROWSERS_PATH=/home/paseo/.cache/ms-playwright \
     npm_config_cache=/tmp/playwright-npm-cache \
-    npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install firefox && \
+    npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install chromium firefox && \
     chown -R developer:developer /home/paseo/.cache/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
 
-# Lighthouse and pa11y need a Chromium binary. The base image ships Playwright's
-# Chromium under a cache directory named after its build number, so resolve the
-# binary at build time instead of pinning that number, and expose a stable path
-# for CHROME_PATH.
+# Lighthouse and pa11y need a Chromium binary. Resolve the binary at build time
+# instead of pinning Playwright's build-numbered directory name, and expose a
+# stable path for CHROME_PATH. Use find with a bounded depth so a future
+# Playwright layout change fails loudly instead of silently breaking the build.
 RUN set -eux && \
-    set -- /home/paseo/.cache/ms-playwright/chromium-*/chrome-linux64/chrome && \
-    [ "$#" -eq 1 ] && [ -x "$1" ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright/chromium-*/chrome-linux64" >&2; exit 1; } && \
-    ln -sfn "$1" /usr/local/bin/chrome
+    mapfile -t chrome_bins < <(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111) && \
+    [ "${#chrome_bins[@]}" -eq 1 ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright, found ${#chrome_bins[@]}" >&2; printf '%s\n' "${chrome_bins[@]}" >&2; exit 1; } && \
+    chrome_bin="${chrome_bins[0]}" && \
+    ln -sfn "$chrome_bin" /usr/local/bin/chrome && \
+    [ -x /usr/local/bin/chrome ] && test "$(readlink -f /usr/local/bin/chrome)" = "$chrome_bin" && \
+    /usr/local/bin/chrome --version
 
 # Lighthouse reads CHROME_PATH; the symlink keeps it valid across base-image
 # Playwright bumps. ENV applies to this and every later layer, so the
