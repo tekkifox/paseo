@@ -17,7 +17,13 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code
 RUN npm install -g @github/copilot
 RUN npm install -g vercel@${VERCEL_CLI_VERSION}
 
-RUN apt-get update && apt-get install -y curl gpg unzip python3 python3-venv make git && \
+ARG MONGOSH_VERSION=2.14.1
+RUN npm install -g mongosh@${MONGOSH_VERSION} && \
+    mongosh --version
+
+RUN apt-get update && apt-get install -y \
+        curl gpg unzip python3 python3-venv make git \
+        jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -34,6 +40,27 @@ RUN curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg
     /usr/local/go/bin/go version
 
 ENV PATH="/usr/local/go/bin:${PATH}"
+
+# actionlint and Terraform both use amd64/arm64 release archives fetched to
+# /tmp, extracted, then deleted together so the image keeps no tarballs.
+ARG ACTIONLINT_VERSION=1.7.12
+ARG TERRAFORM_VERSION=1.17.1
+RUN set -eux && \
+    case "$(dpkg --print-architecture)" in \
+        amd64) tools_arch=amd64 ;; \
+        arm64) tools_arch=arm64 ;; \
+        *) echo "Unsupported architecture for actionlint/terraform: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL -o /tmp/actionlint.tar.gz \
+        "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${tools_arch}.tar.gz" && \
+    tar -C /usr/local/bin -xzf /tmp/actionlint.tar.gz actionlint && \
+    curl -fsSL -o /tmp/terraform.zip \
+        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${tools_arch}.zip" && \
+    unzip -o /tmp/terraform.zip terraform -d /usr/local/bin && \
+    rm -f /tmp/actionlint.tar.gz /tmp/terraform.zip && \
+    chmod +x /usr/local/bin/actionlint /usr/local/bin/terraform && \
+    actionlint --version && \
+    terraform version
 
 RUN curl -fsSL https://composio.dev/install | sh
 
