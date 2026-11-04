@@ -118,6 +118,21 @@ RUN mkdir -p /home/paseo/.cache/ms-playwright && \
     chown -R developer:developer /home/paseo/.cache/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
 
+# hadolint: Dockerfile linter, pinned to the upstream release. The release
+# assets use different spellings from dpkg's architecture names, so any
+# unsupported architecture fails the build instead of fetching a wrong binary.
+ARG HADOLINT_VERSION=v2.15.1
+RUN set -eux && \
+    case "$(dpkg --print-architecture)" in \
+        amd64) hadolint_arch=x86_64 ;; \
+        arm64) hadolint_arch=arm64 ;; \
+        *) echo "Unsupported architecture for hadolint: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL -o /usr/local/bin/hadolint \
+        "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-${hadolint_arch}" && \
+    chmod +x /usr/local/bin/hadolint && \
+    hadolint --version
+
 # The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
 RUN install -d -m 1777 /tmp/opencode
 
