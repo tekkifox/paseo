@@ -21,6 +21,22 @@ ARG MONGOSH_VERSION=2.14.1
 RUN npm install -g mongosh@${MONGOSH_VERSION} && \
     mongosh --version
 
+ARG LIGHTHOUSE_VERSION=13.6.0
+RUN npm install -g lighthouse@${LIGHTHOUSE_VERSION} && \
+    lighthouse --version
+
+ARG LHCI_CLI_VERSION=0.16.0
+RUN npm install -g @lhci/cli@${LHCI_CLI_VERSION} && \
+    lhci --version
+
+ARG PA11Y_VERSION=10.0.0
+RUN npm install -g pa11y@${PA11Y_VERSION} && \
+    pa11y --version
+
+ARG HTML_VALIDATE_VERSION=11.18.0
+RUN npm install -g html-validate@${HTML_VALIDATE_VERSION} && \
+    html-validate --version
+
 RUN apt-get update && apt-get install -y \
         curl gpg unzip python3 python3-venv make git \
         jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget && \
@@ -144,6 +160,20 @@ RUN mkdir -p /home/paseo/.cache/ms-playwright && \
     npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install firefox && \
     chown -R developer:developer /home/paseo/.cache/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
+
+# Lighthouse and pa11y need a Chromium binary. The base image ships Playwright's
+# Chromium under a cache directory named after its build number, so resolve the
+# binary at build time instead of pinning that number, and expose a stable path
+# for CHROME_PATH.
+RUN set -eux && \
+    set -- /home/paseo/.cache/ms-playwright/chromium-*/chrome-linux64/chrome && \
+    [ "$#" -eq 1 ] && [ -x "$1" ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright/chromium-*/chrome-linux64" >&2; exit 1; } && \
+    ln -sfn "$1" /usr/local/bin/chrome
+
+# Lighthouse reads CHROME_PATH; the symlink keeps it valid across base-image
+# Playwright bumps. ENV applies to this and every later layer, so the
+# developer user inherits it.
+ENV CHROME_PATH=/usr/local/bin/chrome
 
 # hadolint: Dockerfile linter, pinned to the upstream release. The release
 # assets use different spellings from dpkg's architecture names, so any
