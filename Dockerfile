@@ -118,6 +118,9 @@ RUN mkdir -p /home/paseo/.cache/ms-playwright && \
     chown -R developer:developer /home/paseo/.cache/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
 
+# The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
+RUN install -d -m 1777 /tmp/opencode
+
 USER developer
 
 # Put the developer user's local bin (where lopper installs) on PATH
