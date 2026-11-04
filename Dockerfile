@@ -166,13 +166,13 @@ RUN mkdir -p /home/paseo/.cache/ms-playwright && \
 # instead of pinning Playwright's build-numbered directory name, and expose a
 # stable path for CHROME_PATH. Use find with a bounded depth so a future
 # Playwright layout change fails loudly instead of silently breaking the build.
-RUN set -eux && \
-    mapfile -t chrome_bins < <(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111) && \
-    [ "${#chrome_bins[@]}" -eq 1 ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright, found ${#chrome_bins[@]}" >&2; printf '%s\n' "${chrome_bins[@]}" >&2; exit 1; } && \
-    chrome_bin="${chrome_bins[0]}" && \
-    ln -sfn "$chrome_bin" /usr/local/bin/chrome && \
-    [ -x /usr/local/bin/chrome ] && test "$(readlink -f /usr/local/bin/chrome)" = "$chrome_bin" && \
-    /usr/local/bin/chrome --version
+RUN set -eu; \
+    chrome_count=$(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 | wc -l); \
+    [ "$chrome_count" -eq 1 ] || { echo "Expected exactly one executable Chromium binary under /home/paseo/.cache/ms-playwright, found $chrome_count" >&2; find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome >&2; exit 1; }; \
+    chrome_bin=$(find /home/paseo/.cache/ms-playwright -maxdepth 5 -type f -name chrome -perm -111 -print -quit); \
+    ln -sfn "$chrome_bin" /usr/local/bin/chrome; \
+    [ -x /usr/local/bin/chrome ]; \
+    [ "$(readlink -f /usr/local/bin/chrome)" = "$chrome_bin" ]
 
 # Lighthouse reads CHROME_PATH; the symlink keeps it valid across base-image
 # Playwright bumps. ENV applies to this and every later layer, so the
