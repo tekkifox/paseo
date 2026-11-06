@@ -225,7 +225,7 @@ jobs:
           PORTAINER_URL="${PORTAINER_URL%/}"
 
           # --- Find the stack by name (never hardcode Id/EndpointId) ---
-          stacks_response=$(curl -sS -w "\n%{http_code}" \
+          stacks_response=$(curl -sS -k -w "\n%{http_code}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             "${PORTAINER_URL}/api/stacks")
           stacks_status=$(printf '%s\n' "$stacks_response" | tail -n 1)
@@ -257,7 +257,7 @@ jobs:
           # --- Capture the currently running image id of paseo-big ---
           get_paseo_big_image() {
             local resp status body
-            resp=$(curl -sS -w "\n%{http_code}" \
+            resp=$(curl -sS -k -w "\n%{http_code}" \
               -H "X-API-Key: ${PORTAINER_API_KEY}" \
               "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
             status=$(printf '%s\n' "$resp" | tail -n 1)
@@ -272,7 +272,7 @@ jobs:
 
           get_paseo_big_container_id() {
             local resp status body
-            resp=$(curl -sS -w "\n%{http_code}" \
+            resp=$(curl -sS -k -w "\n%{http_code}" \
               -H "X-API-Key: ${PORTAINER_API_KEY}" \
               "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
             status=$(printf '%s\n' "$resp" | tail -n 1)
@@ -298,7 +298,7 @@ jobs:
           echo "paseo-big currently running image: ${old_image} (container ${old_container_id:-<unknown>})"
 
           # --- Read the stack's current file (preserve what is running) ---
-          file_response=$(curl -sS -w "\n%{http_code}" \
+          file_response=$(curl -sS -k -w "\n%{http_code}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             "${PORTAINER_URL}/api/stacks/${stack_id}/file")
           file_status=$(printf '%s\n' "$file_response" | tail -n 1)
@@ -323,7 +323,7 @@ jobs:
             --argjson env "$env_array" \
             '{StackFileContent: $compose, Env: $env, PullImage: true}')
 
-          put_response=$(curl -sS -w "\n%{http_code}" \
+          put_response=$(curl -sS -k -w "\n%{http_code}" \
             -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
             -H "X-API-Key: ${PORTAINER_API_KEY}" \
             -H "Content-Type: application/json" \
@@ -365,7 +365,7 @@ jobs:
             fi
             echo "Deleting paseo-big container ${container_id}"
 
-            del_response=$(curl -sS -w "\n%{http_code}" \
+            del_response=$(curl -sS -k -w "\n%{http_code}" \
               -X DELETE "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/${container_id}?force=true" \
               -H "X-API-Key: ${PORTAINER_API_KEY}")
             del_status=$(printf '%s\n' "$del_response" | tail -n 1)
@@ -382,7 +382,7 @@ jobs:
             fi
 
             # Re-issue the same stack PUT (Portainer recreates the missing container).
-            put_response=$(curl -sS -w "\n%{http_code}" \
+            put_response=$(curl -sS -k -w "\n%{http_code}" \
               -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
               -H "X-API-Key: ${PORTAINER_API_KEY}" \
               -H "Content-Type: application/json" \
