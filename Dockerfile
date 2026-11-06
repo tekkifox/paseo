@@ -142,6 +142,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcb-shm0 \
         libxcursor1 \
         libxrender1 \
+        fonts-dejavu-core \
         fonts-liberation \
         imagemagick \
         python3-pil && \
@@ -179,6 +180,78 @@ RUN set -eu; \
 # Playwright bumps. ENV applies to this and every later layer, so the
 # developer user inherits it.
 ENV CHROME_PATH=/usr/local/bin/chrome
+
+# Mermaid diagram tooling. mmdc renders through the Chromium installed above,
+# so skip Puppeteer's own browser download and keep a single browser in the
+# image. Install into /opt/mermaid rather than npm's default /usr/local prefix:
+# a global install there would place the real mmdc binary in /usr/local/bin,
+# where the wrapper below lives.
+ARG MERMAID_CLI_VERSION=12.2.0
+RUN PUPPETEER_SKIP_DOWNLOAD=true npm install -g --prefix /opt/mermaid \
+        @mermaid-js/mermaid-cli@${MERMAID_CLI_VERSION} && \
+    /opt/mermaid/bin/mmdc --version
+
+# Puppeteer config for mmdc. executablePath points at the stable Chromium
+# symlink created above; /usr/local/bin/mmdc re-resolves the actual binary at
+# run time so a Playwright upgrade cannot leave a stale path behind.
+RUN install -d -m 755 /opt/mermaid && \
+    printf '%s\n' \
+        '{' \
+        '  "executablePath": "/usr/local/bin/chrome",' \
+        '  "args": ["--no-sandbox", "--disable-dev-shm-usage"]' \
+        '}' > /opt/mermaid/puppeteer.json && \
+    cat /opt/mermaid/puppeteer.json
+
+# Thin mmdc wrapper. The Chromium directory is build-numbered, so resolve the
+# newest matching binary on every invocation instead of baking a path in at
+# build time. Playwright also uses different internal directory names for
+# linux-x64 (chrome-linux64) and linux-arm64 (chrome-linux), and both are
+# accepted here so the same image definition works on either architecture.
+RUN printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        '# Render Mermaid diagrams with the Playwright Chromium in this image.' \
+        'set -euo pipefail' \
+        '' \
+        'shopt -s nullglob' \
+        'browsers=(' \
+        '  /opt/ms-playwright/chromium-*/chrome-linux64/chrome' \
+        '  /opt/ms-playwright/chromium-*/chrome-linux/chrome' \
+        ')' \
+        'if [ "${#browsers[@]}" -eq 0 ]; then' \
+        '  echo "mmdc: no Playwright Chromium found under /opt/ms-playwright" >&2' \
+        '  exit 1' \
+        'fi' \
+        '' \
+        '# Newest chromium-<build> wins; sort -V orders the build numbers.' \
+        'chrome="$(printf "%s\n" "${browsers[@]}" | sort -V | tail -n 1)"' \
+        'if [ ! -x "$chrome" ]; then' \
+        '  echo "mmdc: resolved Chromium is not executable: $chrome" >&2' \
+        '  exit 1' \
+        'fi' \
+        '' \
+        '# Materialise the config with the run-time path. /opt is read-only for' \
+        '# the runtime user, so the effective config lives in a temp file.' \
+        'config="$(mktemp "${TMPDIR:-/tmp}/mmdc-puppeteer.XXXXXX.json")"' \
+        'trap '"'"'rm -f "$config"'"'"' EXIT' \
+        'jq --arg chrome "$chrome" '"'"'.executablePath = $chrome'"'"' /opt/mermaid/puppeteer.json > "$config"' \
+        '' \
+        '/opt/mermaid/bin/mmdc --puppeteerConfigFile "$config" "$@"' \
+        > /usr/local/bin/mmdc && \
+    chmod 755 /usr/local/bin/mmdc && \
+    cat /usr/local/bin/mmdc
+
+# Fail the build if mmdc cannot produce both output formats. Run as root here,
+# which is why the config above passes --no-sandbox.
+RUN set -eux; \
+    printf 'graph TD\n    A[Mermaid] --> B[Toolchain]\n' > /tmp/mermaid-smoke.mmd; \
+    mmdc --version; \
+    mmdc -i /tmp/mermaid-smoke.mmd -o /tmp/mermaid-smoke.svg; \
+    mmdc -i /tmp/mermaid-smoke.mmd -o /tmp/mermaid-smoke.png; \
+    for f in /tmp/mermaid-smoke.svg /tmp/mermaid-smoke.png; do \
+        [ -s "$f" ] || { echo "Mermaid smoke render produced an empty $f" >&2; exit 1; }; \
+        ls -l "$f"; \
+    done; \
+    rm -f /tmp/mermaid-smoke.mmd /tmp/mermaid-smoke.svg /tmp/mermaid-smoke.png
 
 # hadolint: Dockerfile linter, pinned to the upstream release. The release
 # assets use different spellings from dpkg's architecture names, so any
