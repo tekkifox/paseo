@@ -323,32 +323,32 @@ jobs:
             printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].ImageID // empty'
           }
 
-          get_paseo_big_container_id() {
-            local resp status body
-            resp=$(curl -sS -k -w "\n%{http_code}" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}" \
-              "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
-            status=$(printf '%s\n' "$resp" | tail -n 1)
-            body=$(printf '%s\n' "$resp" | sed '$d')
-            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-              echo "Portainer GET /api/endpoints/${endpoint_id}/docker/containers/json failed with HTTP status ${status}" >&2
-              printf '%s\n' "$body" >&2
-              return 1
-            fi
-            printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].Id // empty'
-          }
-
           old_image=$(get_paseo_big_image)
           if [ -z "$old_image" ]; then
             echo "Could not find a running paseo-big container before redeploy"
             exit 1
           fi
-          # Capture the container id now, while paseo-big is still running. After
-          # the first PUT the container may be stopped or recreated, so a fresh
-          # container-list lookup can come back empty and abort the forced
-          # recreate before it deletes anything.
-          old_container_id=$(get_paseo_big_container_id)
-          echo "paseo-big currently running image: ${old_image} (container ${old_container_id:-<unknown>})"
+          echo "paseo-big currently running image: ${old_image}"
+
+          # --- Read the stack status (1 active, 2 inactive, 3 deploying, 4 error) ---
+          # Portainer runs a deployment in the background after PUT accepts it.
+          # A second PUT while Status is 3 is rejected with 409 "Stack
+          # deployment is already in progress", so wait for the status to leave
+          # 3 instead of failing or removing anything.
+          get_stack_status() {
+            local resp status body
+            resp=$(curl -sS -k -w "\n%{http_code}" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}" \
+              "${PORTAINER_URL}/api/stacks/${stack_id}")
+            status=$(printf '%s\n' "$resp" | tail -n 1)
+            body=$(printf '%s\n' "$resp" | sed '$d')
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Portainer GET /api/stacks/${stack_id} failed with HTTP status ${status}" >&2
+              printf '%s\n' "$body" >&2
+              return 1
+            fi
+            printf '%s\n' "$body" | jq -r '.Status // empty'
+          }
 
           # --- PUT the repository compose with the stack's existing Env and PullImage ---
           # Only the file content changed: Env (including the secrets Portainer
@@ -359,27 +359,92 @@ jobs:
             --argjson env "$env_array" \
             '{StackFileContent: $compose, Env: $env, PullImage: true}')
 
-          put_response=$(curl -sS -k -w "\n%{http_code}" \
-            -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "$body")
-          put_status=$(printf '%s\n' "$put_response" | tail -n 1)
-          put_body=$(printf '%s\n' "$put_response" | sed '$d')
+          put_path="/api/stacks/${stack_id}?endpointId=${endpoint_id}"
+          put_url="${PORTAINER_URL}${put_path}"
+
+          # Bounded retry policy. 409 means "Portainer is still deploying": poll
+          # the stack status before retrying, sharing one wait budget across
+          # attempts so the whole step cannot hang. Other 5xx responses are
+          # treated as transient; other 4xx responses are not retried.
+          max_put_attempts=4
+          retry_backoff=10
+          stack_wait_seconds=120
+          stack_poll_interval=5
+          stack_wait_deadline=$((SECONDS + stack_wait_seconds))
+
+          put_attempt=0
+          put_status=""
+          put_body=""
+
+          while [ "$put_attempt" -lt "$max_put_attempts" ]; do
+            put_attempt=$((put_attempt + 1))
+            echo "Portainer PUT ${put_path} (attempt ${put_attempt} of ${max_put_attempts})"
+
+            put_response=$(curl -sS -k -w "\n%{http_code}" \
+              -X PUT "$put_url" \
+              -H "X-API-Key: ${PORTAINER_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$body")
+            put_status=$(printf '%s\n' "$put_response" | tail -n 1)
+            put_body=$(printf '%s\n' "$put_response" | sed '$d')
+
+            if [ "$put_status" -ge 200 ] && [ "$put_status" -lt 300 ]; then
+              echo "Portainer stack redeployed (PUT accepted on attempt ${put_attempt} of ${max_put_attempts})"
+              break
+            fi
+
+            echo "Portainer PUT ${put_path} failed on attempt ${put_attempt} of ${max_put_attempts} with HTTP status ${put_status}"
+            printf '%s\n' "$put_body"
+
+            if [ "$put_status" -ge 400 ] && [ "$put_status" -lt 500 ] && [ "$put_status" -ne 409 ]; then
+              echo "HTTP ${put_status} is not retryable; giving up"
+              break
+            fi
+
+            if [ "$put_status" -eq 409 ]; then
+              echo "Portainer reports a deployment is already in progress; polling GET /api/stacks/${stack_id} every ${stack_poll_interval}s until Status is no longer 3 (deploying), within a ${stack_wait_seconds}s wait budget"
+              while :; do
+                current_status=$(get_stack_status) || current_status=""
+                if [ -z "$current_status" ]; then
+                  echo "  stack status: <unavailable>"
+                else
+                  echo "  stack status: ${current_status}"
+                fi
+                if [ -n "$current_status" ] && [ "$current_status" != "3" ]; then
+                  echo "  stack is no longer deploying (Status ${current_status})"
+                  break
+                fi
+                if [ "$SECONDS" -ge "$stack_wait_deadline" ]; then
+                  echo "  stack wait budget of ${stack_wait_seconds}s exhausted; still deploying (Status ${current_status:-<unavailable>})"
+                  break
+                fi
+                sleep "$stack_poll_interval"
+              done
+            else
+              echo "Transient HTTP ${put_status}; will retry with backoff"
+            fi
+
+            if [ "$put_attempt" -ge "$max_put_attempts" ]; then
+              break
+            fi
+
+            echo "Waiting ${retry_backoff}s before the next PUT attempt"
+            sleep "$retry_backoff"
+            retry_backoff=$((retry_backoff * 2))
+          done
 
           if [ "$put_status" -lt 200 ] || [ "$put_status" -ge 300 ]; then
-            echo "Portainer PUT /api/stacks/${stack_id} failed with HTTP status ${put_status}"
+            echo "::error::Portainer stack redeploy failed after ${put_attempt} attempt(s): last PUT ${put_path} returned HTTP ${put_status}. The paseo-big container was left running; this workflow never deletes containers."
             printf '%s\n' "$put_body"
             exit 1
           fi
 
-          echo "Portainer stack redeployed (PUT accepted)"
-
-          # --- Poll for paseo-big to come back with a new image id (short grace) ---
+          # --- Poll for paseo-big to come back with a new image id ---
+          # A 2xx only means the deployment was accepted; give Portainer time to
+          # pull the new image and recreate the container.
           overall_deadline=$((SECONDS + 180))
-          grace_deadline=$((SECONDS + 30))
           new_image=""
-          while [ "$SECONDS" -lt "$grace_deadline" ] && [ "$SECONDS" -lt "$overall_deadline" ]; do
+          while [ "$SECONDS" -lt "$overall_deadline" ]; do
             new_image=$(get_paseo_big_image) || true
             if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
               echo "paseo-big now running image: ${new_image}"
@@ -388,65 +453,5 @@ jobs:
             sleep 5
           done
 
-          # If still unchanged, force the recreate.
-          if [ -z "$new_image" ] || [ "$new_image" = "$old_image" ]; then
-            echo "Forced recreate path: Portainer PUT did not recreate paseo-big; deleting the paseo-big container and re-PUTting the stack"
-
-            # Use the id captured before the first PUT; paseo-big is not
-            # necessarily in the running-container list at this point.
-            container_id="$old_container_id"
-            if [ -z "$container_id" ] || [ "$container_id" = "null" ]; then
-              echo "Could not identify the paseo-big container for forced recreate"
-              exit 1
-            fi
-            echo "Deleting paseo-big container ${container_id}"
-
-            del_response=$(curl -sS -k -w "\n%{http_code}" \
-              -X DELETE "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/${container_id}?force=true" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}")
-            del_status=$(printf '%s\n' "$del_response" | tail -n 1)
-            del_body=$(printf '%s\n' "$del_response" | sed '$d')
-            if [ "$del_status" = "404" ]; then
-              # Portainer can replace the container between the id capture and
-              # this DELETE, so a 404 means it is already gone: exactly what
-              # this fallback wanted. Continue to the re-PUT.
-              echo "paseo-big container ${container_id} was already gone (HTTP 404); continuing"
-            elif [ "$del_status" -lt 200 ] || [ "$del_status" -ge 300 ]; then
-              echo "Portainer DELETE /api/endpoints/${endpoint_id}/docker/containers/${container_id} failed with HTTP status ${del_status}"
-              printf '%s\n' "$del_body"
-              exit 1
-            fi
-
-            # Re-issue the same stack PUT (Portainer recreates the missing container).
-            put_response=$(curl -sS -k -w "\n%{http_code}" \
-              -X PUT "${PORTAINER_URL}/api/stacks/${stack_id}?endpointId=${endpoint_id}" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}" \
-              -H "Content-Type: application/json" \
-              -d "$body")
-            put_status=$(printf '%s\n' "$put_response" | tail -n 1)
-            put_body=$(printf '%s\n' "$put_response" | sed '$d')
-            if [ "$put_status" -lt 200 ] || [ "$put_status" -ge 300 ]; then
-              echo "Portainer PUT /api/stacks/${stack_id} failed with HTTP status ${put_status}"
-              printf '%s\n' "$put_body"
-              exit 1
-            fi
-            echo "Portainer stack redeployed (PUT accepted)"
-
-            # Poll up to the remaining overall budget.
-            new_image=""
-            while [ "$SECONDS" -lt "$overall_deadline" ]; do
-              new_image=$(get_paseo_big_image) || true
-              if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
-                echo "paseo-big now running image: ${new_image}"
-                exit 0
-              fi
-              sleep 5
-            done
-          fi
-
-          if [ "$new_image" = "$old_image" ]; then
-            echo "Portainer accepted the PUT but paseo-big still runs the old image (${old_image}); the container was not recreated. Last observed image: ${new_image:-<none>}"
-          else
-            echo "Timed out after 180s waiting for paseo-big to come back (last image: ${new_image:-<none>})"
-          fi
+          echo "::error::Portainer accepted the PUT but paseo-big still runs image ${old_image} after 180s (last observed image: ${new_image:-<none>}). The paseo-big container was left running; this workflow never deletes containers."
           exit 1
