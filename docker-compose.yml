@@ -25,3 +25,11 @@ services:
     volumes:
       - /home/ross/stacks/paseo/home:/home/paseo
       - /home/ross/stacks/paseo/workspace:/workspace
+    networks:
+      # The running container is attached to the external proxy network;
+      # omitting it would move paseo-big onto a default project network.
+      - proxy
+
+networks:
+  proxy:
+    external: true
