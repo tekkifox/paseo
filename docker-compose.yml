@@ -2,6 +2,16 @@ services:
   paseo:
     build: .
     image: ghcr.io/getpaseo/paseo:latest
+    # MagicDNS first so tailnet names resolve; 1.1.1.1 stays as a fallback.
+    dns:
+      - 100.100.100.100
+      - 1.1.1.1
+    # One container owns the schedule: supercronic runs the crontab beside the
+    # daemon, and the entrypoint is exec'd so tini still reaps it.
+    command:
+      - sh
+      - -c
+      - supercronic -passthrough-logs /home/paseo/infra-map/crontab & exec /usr/local/bin/paseo-docker-entrypoint
     # Compose (standalone) limits
     # Cap at 3.5 CPUs (just under 90% of the host's 4 cores)
     cpus: "3.5"
