@@ -192,6 +192,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd -u 1001 -m -s /bin/bash developer
 
+# OpenSSH resolves ~/.ssh from the passwd home directory, not from $HOME. The
+# runtime home is the bind-mounted /home/paseo, so give uid 1001 that passwd
+# home. `usermod -d` without -m rewrites only /etc/passwd: whatever the image
+# already has under /home/developer stays where it is and keeps working.
+# /home/paseo must also exist in the image itself, owned by the runtime user,
+# so the image is usable before a volume is mounted over it. The base image
+# already has placeholder directories there; hand them to the runtime user
+# rather than deleting them.
+RUN set -eu; \
+    usermod -d /home/paseo developer; \
+    install -d -o developer -g developer -m 755 /home/paseo; \
+    chown -R developer:developer /home/paseo; \
+    passwd_home="$(getent passwd 1001 | cut -d: -f6)"; \
+    [ "$passwd_home" = /home/paseo ] || { \
+        echo "uid 1001 passwd home is '$passwd_home', expected /home/paseo" >&2; exit 1; }; \
+    [ -d /home/paseo ] || { echo "/home/paseo is not a directory" >&2; exit 1; }; \
+    [ "$(stat -c %u:%g /home/paseo)" = 1001:1001 ] || { \
+        echo "/home/paseo is not owned by developer (1001:1001)" >&2; \
+        stat -c '%u:%g %n' /home/paseo >&2; exit 1; }; \
+    ssh_g="$(runuser -u developer -- ssh -G example.invalid 2>/dev/null)"; \
+    echo "$ssh_g" | grep -q '^userknownhostsfile /home/paseo/\.ssh/' || { \
+        echo "ssh userknownhostsfile is not under /home/paseo/.ssh" >&2; \
+        echo "$ssh_g" | grep -E '^userknownhostsfile' >&2; exit 1; }; \
+    if echo "$ssh_g" | grep -q '/home/developer'; then \
+        echo "ssh -G still references /home/developer" >&2; \
+        echo "$ssh_g" | grep '/home/developer' >&2; exit 1; \
+    fi; \
+    identity_files="$(echo "$ssh_g" | sed -n "s|^identityfile ~|$passwd_home|p")"; \
+    [ -n "$identity_files" ] || { echo "ssh -G reported no identityfile entries" >&2; exit 1; }; \
+    bad_identity="$(printf '%s\n' "$identity_files" | grep -v "^$passwd_home/\.ssh/" || true)"; \
+    [ -z "$bad_identity" ] || { \
+        echo "ssh identityfile is not under $passwd_home/.ssh:" >&2; \
+        printf '%s\n' "$bad_identity" >&2; exit 1; }; \
+    echo "ssh home check passed: passwd home=$passwd_home"; \
+    echo "$ssh_g" | grep -E '^userknownhostsfile'; \
+    printf '%s\n' "$identity_files" | head -n 1
+
 # Browsers live outside $HOME because /home/paseo is a bind mount at runtime
 # and shadows the image. Install both browsers here. The base image
 # (ghcr.io/getpaseo/paseo) ships no Playwright browsers at all, so neither
