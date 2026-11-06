@@ -1,7 +1,15 @@
 services:
   paseo:
-    build: .
-    image: ghcr.io/getpaseo/paseo:latest
+    # CI publishes this image; the stack pulls it rather than building here.
+    image: ghcr.io/tekkifox/paseo:latest
+    container_name: paseo-big
+    hostname: paseo-big
+    user: "1001:1001"
+    restart: unless-stopped
+    # Portainer writes the stack's environment to stack.env. A plain
+    # `docker compose up` in this repository needs that file present.
+    env_file:
+      - stack.env
     # MagicDNS first so tailnet names resolve; 1.1.1.1 stays as a fallback.
     dns:
       - 100.100.100.100
@@ -12,3 +20,14 @@ services:
       - sh
       - -c
       - supercronic -passthrough-logs /home/paseo/infra-map/crontab & exec /usr/local/bin/paseo-docker-entrypoint
+    # These bind mounts are what keep the Paseo home and the map job alive;
+    # without them Docker substitutes an empty anonymous volume.
+    volumes:
+      - /home/ross/stacks/paseo/home:/home/paseo
+      - /home/ross/stacks/paseo/workspace:/workspace
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
