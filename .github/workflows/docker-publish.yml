@@ -214,6 +214,13 @@ jobs:
     needs: merge
     if: github.ref == 'refs/heads/main'
     steps:
+      # The stack file now comes from the commit the image was built from, so
+      # the deploy job needs the repository checked out too.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
       - name: Redeploy stack via Portainer API
         shell: bash
         env:
@@ -221,6 +228,52 @@ jobs:
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
         run: |
           set -euo pipefail
+
+          compose_file="docker-compose.yml"
+
+          # --- Validate the repository compose before touching the stack ---
+          # The deploy publishes this file verbatim. A missing, empty or
+          # unrelated file must fail the step instead of pushing an empty or
+          # wrong stack definition to the host.
+          if [ ! -f "$compose_file" ]; then
+            echo "::error::Repository compose not found: ${compose_file} (expected at the repository root)"
+            exit 1
+          fi
+          if [ ! -s "$compose_file" ]; then
+            echo "::error::Repository compose is empty: ${compose_file}"
+            exit 1
+          fi
+
+          service_names=$(awk '
+            /^services:[[:space:]]*$/ { in_services = 1; next }
+            in_services && /^[^[:space:]#]/ { in_services = 0 }
+            in_services && /^  [A-Za-z0-9._-]+:[[:space:]]*$/ {
+              name = $1
+              sub(/:$/, "", name)
+              print name
+            }
+          ' "$compose_file")
+          if [ -z "$service_names" ]; then
+            echo "::error::Repository compose lists no services: ${compose_file}"
+            exit 1
+          fi
+          if ! printf '%s\n' "$service_names" | grep -qx 'paseo'; then
+            echo "::error::Repository compose has no 'paseo' service: ${compose_file}"
+            printf '%s\n' "$service_names"
+            exit 1
+          fi
+
+          compose_sha256=$(
+            { sha256sum "$compose_file" 2>/dev/null || shasum -a 256 "$compose_file"; } | awk '{print $1}'
+          )
+          if [ -z "$compose_sha256" ]; then
+            echo "::error::Could not hash ${compose_file} (no sha256sum or shasum available)"
+            exit 1
+          fi
+
+          echo "Publishing compose ${compose_file} ($(wc -c < "$compose_file" | tr -d '[:space:]') bytes, sha256 ${compose_sha256})"
+          echo "Compose services:"
+          printf '%s\n' "$service_names" | sed 's/^/  - /'
 
           PORTAINER_URL="${PORTAINER_URL%/}"
 
@@ -297,29 +350,12 @@ jobs:
           old_container_id=$(get_paseo_big_container_id)
           echo "paseo-big currently running image: ${old_image} (container ${old_container_id:-<unknown>})"
 
-          # --- Read the stack's current file (preserve what is running) ---
-          file_response=$(curl -sS -k -w "\n%{http_code}" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            "${PORTAINER_URL}/api/stacks/${stack_id}/file")
-          file_status=$(printf '%s\n' "$file_response" | tail -n 1)
-          file_body=$(printf '%s\n' "$file_response" | sed '$d')
-
-          if [ "$file_status" -lt 200 ] || [ "$file_status" -ge 300 ]; then
-            echo "Portainer GET /api/stacks/${stack_id}/file failed with HTTP status ${file_status}"
-            printf '%s\n' "$file_body"
-            exit 1
-          fi
-
-          stack_file_content=$(printf '%s\n' "$file_body" | jq -r '.StackFileContent // empty')
-          if [ -z "$stack_file_content" ]; then
-            echo "Portainer /api/stacks/${stack_id}/file returned no StackFileContent"
-            printf '%s\n' "$file_body"
-            exit 1
-          fi
-
-          # --- PUT the unchanged file back with existing Env and PullImage ---
+          # --- PUT the repository compose with the stack's existing Env and PullImage ---
+          # Only the file content changed: Env (including the secrets Portainer
+          # holds) still comes from the stack record read above, and
+          # PullImage keeps the newly pushed image in use.
           body=$(jq -n \
-            --arg compose "$stack_file_content" \
+            --rawfile compose "$compose_file" \
             --argjson env "$env_array" \
             '{StackFileContent: $compose, Env: $env, PullImage: true}')
 
