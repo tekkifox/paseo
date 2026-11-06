@@ -39,7 +39,7 @@ RUN npm install -g html-validate@${HTML_VALIDATE_VERSION} && \
     html-validate --version
 
 RUN apt-get update && apt-get install -y \
-        curl gpg unzip python3 python3-venv make git \
+        curl gpg unzip bzip2 python3 python3-venv make git \
         jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
@@ -385,6 +385,27 @@ RUN set -eux && \
         "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-${hadolint_arch}" && \
     chmod +x /usr/local/bin/hadolint && \
     hadolint --version
+
+# restic backs up the Vault (see README.md). Install the pinned official release
+# for both architectures the image builds; the release asset names use the same
+# amd64/arm64 spellings as dpkg. The checksum is pinned per architecture, the
+# archive is decompressed straight into place and deleted, and `restic version`
+# proves the binary runs inside this image.
+ARG RESTIC_VERSION=0.19.1
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) restic_arch=amd64; sha256=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c ;; \
+      arm64) restic_arch=arm64; sha256=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465 ;; \
+      *) echo "unsupported architecture for restic: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    asset="restic_${RESTIC_VERSION}_linux_${restic_arch}.bz2"; \
+    curl -fsSL --proto '=https' -o /tmp/restic.bz2 \
+      "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/${asset}"; \
+    echo "${sha256}  /tmp/restic.bz2" | sha256sum -c -; \
+    bunzip2 -c /tmp/restic.bz2 > /usr/local/bin/restic; \
+    chmod 0755 /usr/local/bin/restic; \
+    rm -f /tmp/restic.bz2; \
+    restic version
 
 # The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
 RUN install -d -m 1777 /tmp/opencode

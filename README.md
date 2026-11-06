@@ -40,6 +40,20 @@ Because the scheduler runs in the background, `ps` inside the container shows a
 `paseo-cron` process and a `supercronic` process alongside the Paseo daemon.
 That is expected, and `docker logs` shows the `[cron]` state directly.
 
+## Vault backup (restic)
+
+The image includes [restic](https://restic.net/), the backup client used for the
+Vault. It backs up `/home/paseo/Vault` — the fleet credentials — to an S3
+repository on the MinIO instance, in the `restic-paseo-vault` bucket. The
+version is pinned with `ARG RESTIC_VERSION` in the `Dockerfile`, so it is
+visible without reading the install layer.
+
+The backup script (`/home/paseo/bin/restic-vault-backup.sh`), its environment
+file, and its crontab entry (including the weekly `forget --prune`) live on the
+durable home bind mount, not in the image. Only the `restic` binary ships here,
+in `/usr/local/bin`, so the script's `command -v restic` finds it without the
+hand-downloaded fallback.
+
 ## DNS
 
 The service sets:
