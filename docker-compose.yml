@@ -25,9 +25,3 @@ services:
     volumes:
       - /home/ross/stacks/paseo/home:/home/paseo
       - /home/ross/stacks/paseo/workspace:/workspace
-    networks:
-      - proxy
-
-networks:
-  proxy:
-    external: true
