@@ -14,12 +14,13 @@ services:
     dns:
       - 100.100.100.100
       - 1.1.1.1
-    # One container owns the schedule: supercronic runs the crontab beside the
-    # daemon, and the entrypoint is exec'd so tini still reaps it.
+    # One container owns the schedule: paseo-cron supervises supercronic on
+    # /home/paseo/crontab beside the daemon, and the entrypoint is exec'd so
+    # tini still reaps it.
     command:
       - sh
       - -c
-      - supercronic -passthrough-logs /home/paseo/infra-map/crontab & exec /usr/local/bin/paseo-docker-entrypoint
+      - paseo-cron & exec /usr/local/bin/paseo-docker-entrypoint
     # These bind mounts are what keep the Paseo home and the map job alive;
     # without them Docker substitutes an empty anonymous volume.
     volumes:
