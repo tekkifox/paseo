@@ -99,6 +99,44 @@ RUN set -eux; \
     fi; \
     echo "supercronic smoke test: $(head -n 1 "$tmp/proof")"
 
+# paseo-cron keeps the schedule alive when the home is empty: it creates an
+# empty crontab instead of letting supercronic exit, restarts supercronic if it
+# exits, and logs every decision with a `[cron]` prefix. The compose command
+# runs it in the background beside the daemon; see README.md.
+COPY paseo-cron /usr/local/bin/paseo-cron
+RUN chmod 0755 /usr/local/bin/paseo-cron
+
+# Prove the supervisor handles both a fresh home (no crontab) and a home that
+# already has a valid one. Each case runs the real script for a couple of
+# seconds and kills its process group, so no supervisor outlives the check.
+# PASEO_CRON_HOME is the test-only override that keeps the check out of
+# /home/paseo; the empty-home case must log the creation, and the valid case
+# must leave the existing file untouched and actually run its job.
+RUN set -eux; \
+    [ -f /usr/local/bin/paseo-cron ]; \
+    [ -x /usr/local/bin/paseo-cron ]; \
+    empty="$(mktemp -d)"; \
+    valid="$(mktemp -d)"; \
+    printf '* * * * * * * echo fired >> %s/proof\n' "$valid" > "$valid/crontab"; \
+    valid_before="$(sha256sum "$valid/crontab" | cut -d' ' -f1)"; \
+    run_case() { \
+        bash -c 'set -m; PASEO_CRON_HOME="$1" paseo-cron >"$2" 2>&1 & pid=$!; deadline=$((SECONDS + 10)); if [ -n "${3:-}" ]; then while [ ! -s "$3" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2; done; else sleep 2; fi; kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true; for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done; kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' _ "$1" "$2" "${3:-}"; \
+    }; \
+    run_case "$empty" "$empty.log"; \
+    grep -q '^\[cron\] created empty crontab' "$empty.log"; \
+    grep -q '^\[cron\] starting supercronic' "$empty.log"; \
+    [ -f "$empty/crontab" ]; \
+    ! grep -Eq '^[[:space:]]*[^#[:space:]]' "$empty/crontab"; \
+    echo "paseo-cron empty-home log:"; cat "$empty.log"; \
+    run_case "$valid" "$valid.log" "$valid/proof"; \
+    ! grep -q 'created empty crontab' "$valid.log"; \
+    grep -q '^\[cron\] starting supercronic' "$valid.log"; \
+    [ "$(sha256sum "$valid/crontab" | cut -d' ' -f1)" = "$valid_before" ]; \
+    [ -s "$valid/proof" ]; \
+    echo "paseo-cron valid-crontab log:"; cat "$valid.log"; \
+    rm -rf "$empty" "$valid"; \
+    echo "paseo-cron smoke test: empty-home and valid-crontab cases passed"
+
 # actionlint and Terraform both use amd64/arm64 release archives fetched to
 # /tmp, extracted, then deleted together so the image keeps no tarballs.
 ARG ACTIONLINT_VERSION=1.7.12

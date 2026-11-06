@@ -1,0 +1,50 @@
+#!/bin/sh
+# Supervisor for the container's crontab.
+#
+# The compose command starts this in the background beside the Paseo daemon:
+#   sh -c 'paseo-cron & exec /usr/local/bin/paseo-docker-entrypoint'
+#
+# A fresh home has no crontab yet, and supercronic exits immediately when the
+# file is missing. The daemon keeps running, so the container looked healthy
+# with no schedule at all. This supervisor creates an empty crontab instead
+# (loudly), then keeps supercronic running: if it exits for any reason it is
+# restarted after a short, fixed delay so one bad crontab cannot end the
+# schedule permanently.
+#
+# It writes only under /home/paseo.
+set -u
+
+# Test-only override used by the Dockerfile check. The image and the compose
+# service never set it, so production always uses /home/paseo.
+home="${PASEO_CRON_HOME:-/home/paseo}"
+crontab="$home/crontab"
+restart_delay=5
+
+log() {
+    printf '[cron] %s\n' "$*"
+}
+
+if [ ! -e "$crontab" ]; then
+    if ! mkdir -p "$home"; then
+        log "cannot create $home; no schedule is running"
+        exit 1
+    fi
+    if ! cat > "$crontab" <<'CRONTAB'
+# The map job is not installed in this home.
+# paseo-cron created this empty crontab so supercronic has a file to watch.
+# Replace it, or mount the real one, to schedule jobs.
+CRONTAB
+    then
+        log "cannot write an empty crontab at $crontab; no schedule is running"
+        exit 1
+    fi
+    log "created empty crontab at $crontab: the map job is not installed in this home"
+fi
+
+while :; do
+    log "starting supercronic -passthrough-logs on $crontab"
+    supercronic -passthrough-logs "$crontab"
+    status=$?
+    log "supercronic exited with status $status; restarting in ${restart_delay}s"
+    sleep "$restart_delay"
+done
