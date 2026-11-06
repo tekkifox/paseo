@@ -228,41 +228,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pil && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -u 1001 -m -s /bin/bash developer
-
-# OpenSSH resolves ~/.ssh from the passwd home directory, not from $HOME. The
-# runtime home is the bind-mounted /home/paseo, so give uid 1001 that passwd
-# home. `usermod -d` without -m rewrites only /etc/passwd: whatever the image
-# already has under /home/developer stays where it is and keeps working.
-# /home/paseo must also exist in the image itself, owned by the runtime user,
-# so the image is usable before a volume is mounted over it. The base image
-# already has placeholder directories there; hand them to the runtime user
-# rather than deleting them.
+# The base image ships a `paseo` account at uid/gid 1000 with home
+# /home/paseo. The runtime user must be named `paseo` and keep uid/gid 1001,
+# so move that account's ids instead of adding a second account (`useradd`
+# refuses a duplicate name) or deleting the base account.
 RUN set -eu; \
-    usermod -d /home/paseo developer; \
-    install -d -o developer -g developer -m 755 /home/paseo; \
-    chown -R developer:developer /home/paseo; \
-    passwd_home="$(getent passwd 1001 | cut -d: -f6)"; \
+    groupmod -g 1001 paseo; \
+    usermod -u 1001 -g paseo -d /home/paseo -s /bin/bash paseo; \
+    install -d -o paseo -g paseo -m 755 /home/paseo; \
+    chown -R paseo:paseo /home/paseo; \
+    [ "$(getent passwd 1001 | cut -d: -f1)" = paseo ] || { \
+        echo "uid 1001 is not the paseo account" >&2; getent passwd 1001 >&2; exit 1; }; \
+    [ "$(getent group 1001 | cut -d: -f1)" = paseo ] || { \
+        echo "gid 1001 is not the paseo group" >&2; getent group 1001 >&2; exit 1; }; \
+    passwd_home="$(getent passwd paseo | cut -d: -f6)"; \
     [ "$passwd_home" = /home/paseo ] || { \
-        echo "uid 1001 passwd home is '$passwd_home', expected /home/paseo" >&2; exit 1; }; \
+        echo "paseo passwd home is '$passwd_home', expected /home/paseo" >&2; exit 1; }; \
     [ -d /home/paseo ] || { echo "/home/paseo is not a directory" >&2; exit 1; }; \
     [ "$(stat -c %u:%g /home/paseo)" = 1001:1001 ] || { \
-        echo "/home/paseo is not owned by developer (1001:1001)" >&2; \
+        echo "/home/paseo is not owned by paseo (1001:1001)" >&2; \
         stat -c '%u:%g %n' /home/paseo >&2; exit 1; }; \
-    ssh_g="$(runuser -u developer -- ssh -G example.invalid 2>/dev/null)"; \
+    ssh_g="$(runuser -u paseo -- ssh -G example.invalid 2>/dev/null)"; \
     echo "$ssh_g" | grep -q '^userknownhostsfile /home/paseo/\.ssh/' || { \
         echo "ssh userknownhostsfile is not under /home/paseo/.ssh" >&2; \
         echo "$ssh_g" | grep -E '^userknownhostsfile' >&2; exit 1; }; \
-    if echo "$ssh_g" | grep -q '/home/developer'; then \
-        echo "ssh -G still references /home/developer" >&2; \
-        echo "$ssh_g" | grep '/home/developer' >&2; exit 1; \
-    fi; \
+    stray_home="$(echo "$ssh_g" | grep -o '/home/[^/]*' | grep -v '^/home/paseo$' || true)"; \
+    [ -z "$stray_home" ] || { \
+        echo "ssh -G references a home other than /home/paseo:" >&2; \
+        printf '%s\n' "$stray_home" >&2; exit 1; }; \
     identity_files="$(echo "$ssh_g" | sed -n "s|^identityfile ~|$passwd_home|p")"; \
     [ -n "$identity_files" ] || { echo "ssh -G reported no identityfile entries" >&2; exit 1; }; \
     bad_identity="$(printf '%s\n' "$identity_files" | grep -v "^$passwd_home/\.ssh/" || true)"; \
     [ -z "$bad_identity" ] || { \
         echo "ssh identityfile is not under $passwd_home/.ssh:" >&2; \
         printf '%s\n' "$bad_identity" >&2; exit 1; }; \
+    id paseo; \
+    getent passwd paseo; \
     echo "ssh home check passed: passwd home=$passwd_home"; \
     echo "$ssh_g" | grep -E '^userknownhostsfile'; \
     printf '%s\n' "$identity_files" | head -n 1
@@ -278,7 +279,7 @@ RUN mkdir -p /opt/ms-playwright && \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     npm_config_cache=/tmp/playwright-npm-cache \
     npm exec --yes --package=playwright@${PLAYWRIGHT_VERSION} -- playwright install chromium firefox && \
-    chown -R developer:developer /opt/ms-playwright && \
+    chown -R paseo:paseo /opt/ms-playwright && \
     rm -rf /tmp/playwright-npm-cache
 
 # Lighthouse and pa11y need a Chromium binary. Resolve the binary at build time
@@ -295,7 +296,7 @@ RUN set -eu; \
 
 # Lighthouse reads CHROME_PATH; the symlink keeps it valid across base-image
 # Playwright bumps. ENV applies to this and every later layer, so the
-# developer user inherits it.
+# paseo user inherits it.
 ENV CHROME_PATH=/usr/local/bin/chrome
 
 # Mermaid diagram tooling. mmdc renders through the Chromium installed above,
@@ -388,12 +389,21 @@ RUN set -eux && \
 # The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
 RUN install -d -m 1777 /tmp/opencode
 
-USER developer
+# lopper installs outside the runtime home on purpose: /home/paseo is a bind
+# mount in the deployed container, so a binary placed there at build time is
+# shadowed at runtime. /usr/local/bin is already on the default PATH for every
+# user, so no PATH entry is needed.
+RUN curl -fsSL https://lopper.dev/install.sh | LOPPER_INSTALL_DIR=/usr/local/bin sh && \
+    lopper --version
 
-# Put the developer user's local bin (where lopper installs) on PATH
-ENV PATH="/home/developer/.local/bin:${PATH}"
+USER paseo
 
-RUN curl -fsSL https://lopper.dev/install.sh | LOPPER_INSTALL_DIR=/home/developer/.local/bin sh && \
+# Prove the runtime user can run lopper and that it resolves from outside the
+# bind-mounted home.
+RUN set -eu; \
+    lopper_path="$(command -v lopper)"; \
+    [ "$lopper_path" = /usr/local/bin/lopper ] || { \
+        echo "lopper resolved to '$lopper_path', expected /usr/local/bin/lopper" >&2; exit 1; }; \
     lopper --version
 
 # Enable TUI interactivity
