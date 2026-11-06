@@ -7,6 +7,7 @@ ARG VERCEL_CLI_VERSION=65.2.0
 # (Playwright build 1509). Keep this in sync with the @playwright/test version
 # used by the agent projects.
 ARG PLAYWRIGHT_VERSION=1.58.2
+ARG SUPERCRONIC_VERSION=0.2.51
 
 WORKDIR /workspace
 
@@ -56,6 +57,47 @@ RUN curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg
     /usr/local/go/bin/go version
 
 ENV PATH="/usr/local/go/bin:${PATH}"
+
+# supercronic runs a container's own crontab without a cron daemon, a
+# root-owned spool, or the host's scheduler/timer. A service opts in by using
+# it as its container command, e.g.
+#   supercronic -passthrough-logs /path/to/crontab
+# It is a static Go binary, pinned by version and checksum for each supported
+# architecture; the release asset names match dpkg's amd64/arm64 values.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) asset="supercronic-linux-amd64"; sha256="cc232108374e8e2b537045f2d5eaa1229f619db314c3ba6a14d38b35dc0aa123" ;; \
+      arm64) asset="supercronic-linux-arm64"; sha256="4ae22576a78223d8ccdf5f3b3660a5cbb5288416bf0ca96afc4a36d195932b94" ;; \
+      *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' -o /usr/local/bin/supercronic \
+      "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/${asset}"; \
+    echo "${sha256}  /usr/local/bin/supercronic" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/supercronic; \
+    supercronic -version
+
+# Prove the scheduler actually fires jobs in this image. Under cronexpr a
+# six-field expression is minutes + year, so the smoke test uses the seven-field
+# form (seconds + five standard fields + year) to run every second; a few
+# seconds is then enough to see the appended line.
+RUN set -eux; \
+    tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp"' EXIT; \
+    printf '* * * * * * * echo fired >> %s/proof\n' "$tmp" > "$tmp/crontab"; \
+    supercronic -passthrough-logs "$tmp/crontab" & \
+    pid=$!; \
+    fired=0; \
+    for _ in $(seq 1 20); do \
+      if [ -s "$tmp/proof" ]; then fired=1; break; fi; \
+      sleep 0.5; \
+    done; \
+    kill "$pid" 2>/dev/null || true; \
+    wait "$pid" 2>/dev/null || true; \
+    if [ "$fired" -ne 1 ]; then \
+      echo "supercronic smoke test failed: scheduled job never ran" >&2; \
+      exit 1; \
+    fi; \
+    echo "supercronic smoke test: $(head -n 1 "$tmp/proof")"
 
 # actionlint and Terraform both use amd64/arm64 release archives fetched to
 # /tmp, extracted, then deleted together so the image keeps no tarballs.
