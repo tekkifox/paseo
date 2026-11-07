@@ -224,7 +224,7 @@ jobs:
       # Portainer is only reachable over the tailnet. Join it on the hosted
       # runner before the first Portainer API call.
       - name: Join the tailnet
-        uses: tailscale/github-action@v3
+        uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           args: --hostname=gh-paseo-${{ github.run_id }}
