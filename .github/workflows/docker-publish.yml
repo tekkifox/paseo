@@ -227,7 +227,7 @@ jobs:
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --hostname=gh-paseo-${{ github.run_id }}
+          hostname: gh-paseo-${{ github.run_id }}
 
       - name: Redeploy stack via Portainer API
         shell: bash
