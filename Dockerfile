@@ -179,8 +179,9 @@ RUN chmod 755 /etc/ssh/ssh_config
 
 # Visual verification tooling: Playwright's Chromium and Firefox runtime
 # libraries (the Debian 12 sets that `playwright install-deps` uses, plus the
-# X11/vulkan extras Chromium dlopens), real fonts so text does not render as
-# boxes, ImageMagick for `compare`/`convert` screenshot diffs, and Pillow
+# X11/vulkan extras Chromium dlopens), fonts covering Latin, CJK, emoji, Thai
+# and Lao so captured text does not render as boxes, ImageMagick for
+# `compare`/`convert` screenshot diffs, and Pillow
 # (python3-pil) for Python-based image work. The second group is the extra
 # GTK/X11 stack Firefox needs; without libgtk-3-0 its libmozgtk.so fails to
 # load even in headless mode.
@@ -224,6 +225,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxrender1 \
         fonts-dejavu-core \
         fonts-liberation \
+        fonts-noto-cjk \
+        fonts-noto-core \
+        fonts-noto-color-emoji \
+        fonts-thai-tlwg \
         imagemagick \
         python3-pil && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
