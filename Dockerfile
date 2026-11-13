@@ -40,7 +40,8 @@ RUN npm install -g html-validate@${HTML_VALIDATE_VERSION} && \
 
 RUN apt-get update && apt-get install -y \
         curl gpg unzip bzip2 python3 python3-venv make git \
-        jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget && \
+        jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget \
+        sshpass rsync python3-passlib python3-netaddr age && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -166,6 +167,79 @@ RUN python3 -m venv /opt/oci-cli && \
     ln -sf /opt/oci-cli/bin/oci /usr/local/bin/oci
 
 RUN oci --version
+
+# Ansible drives the fleet hosts from inside this container. Debian 12 is
+# PEP 668-managed, so ansible-core and ansible-lint live in a pinned virtual
+# environment like the OCI CLI above, with their entry points symlinked into
+# /usr/local/bin for every user. The collections the fleet playbook uses are
+# pinned and installed below the venv, and ANSIBLE_COLLECTIONS_PATH makes them
+# visible to every ansible invocation in the image.
+ARG ANSIBLE_CORE_VERSION=2.19.9
+ARG ANSIBLE_LINT_VERSION=26.11.0
+ARG COMMUNITY_GENERAL_VERSION=14.0.1
+ARG COMMUNITY_DOCKER_VERSION=5.4.0
+ARG ANSIBLE_POSIX_VERSION=2.2.2
+ARG COMMUNITY_SOPS_VERSION=2.5.1
+RUN python3 -m venv /opt/ansible && \
+    /opt/ansible/bin/pip install --no-cache-dir --disable-pip-version-check \
+        ansible-core==${ANSIBLE_CORE_VERSION} \
+        ansible-lint==${ANSIBLE_LINT_VERSION} && \
+    for bin in ansible ansible-playbook ansible-vault ansible-galaxy ansible-doc ansible-inventory ansible-lint; do \
+        ln -sf "/opt/ansible/bin/${bin}" "/usr/local/bin/${bin}"; \
+    done
+
+ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
+
+RUN ansible-galaxy collection install -p "${ANSIBLE_COLLECTIONS_PATH}" \
+        "community.general:==${COMMUNITY_GENERAL_VERSION}" \
+        "community.docker:==${COMMUNITY_DOCKER_VERSION}" \
+        "ansible.posix:==${ANSIBLE_POSIX_VERSION}" \
+        "community.sops:==${COMMUNITY_SOPS_VERSION}"
+
+# Prove the toolchain works before the image ships: the binaries resolve, the
+# pinned collections are visible, a playbook using one module from each
+# collection passes a real syntax check, and a vault encrypted file can be read
+# back without an interactive password prompt.
+RUN set -eux; \
+    ansible --version; \
+    ansible-lint --version; \
+    ansible-galaxy collection list; \
+    tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp"' EXIT; \
+    printf '%s\n' \
+        '---' \
+        '- name: ansible smoke' \
+        '  hosts: localhost' \
+        '  gather_facts: false' \
+        '  tasks:' \
+        '    - name: resolve an ansible.posix module' \
+        '      ansible.posix.sysctl:' \
+        '        name: kernel.sysrq' \
+        '        value: "1"' \
+        '        state: present' \
+        '    - name: resolve a community.general module' \
+        '      community.general.timezone:' \
+        '        name: UTC' \
+        '    - name: resolve a community.docker module' \
+        '      community.docker.docker_container:' \
+        '        name: ansible-smoke' \
+        '        state: absent' \
+        '    - name: resolve a community.sops module' \
+        '      community.sops.sops_encrypt:' \
+        '        path: /tmp/ansible-sops-smoke.yaml' \
+        '        content: "value: smoke"' \
+        > "$tmp/playbook.yml"; \
+    ansible-playbook --syntax-check "$tmp/playbook.yml"; \
+    printf 'ansible-vault round trip\n' > "$tmp/plain.txt"; \
+    printf 'smoke-vault-password\n' > "$tmp/pass.txt"; \
+    ansible-vault encrypt --vault-password-file "$tmp/pass.txt" "$tmp/plain.txt"; \
+    if grep -q 'ansible-vault round trip' "$tmp/plain.txt"; then \
+        echo "ansible smoke test: encrypted file still contains plaintext" >&2; \
+        exit 1; \
+    fi; \
+    ansible-vault decrypt --vault-password-file "$tmp/pass.txt" "$tmp/plain.txt"; \
+    grep -qx 'ansible-vault round trip' "$tmp/plain.txt"; \
+    echo "ansible smoke test: syntax check and vault round trip passed"
 
 # Setup system-wide rules for GitHub connections
 RUN mkdir -p /etc/ssh && \
@@ -411,6 +485,42 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/restic; \
     rm -f /tmp/restic.bz2; \
     restic version
+
+# sops encrypts the fleet's SOPS/age secrets. Install the pinned official
+# Debian package for both architectures the image builds; the release asset
+# names use the same amd64/arm64 spellings as dpkg, and the checksum is pinned
+# per architecture. dpkg -i is enough because the package has no dependencies.
+ARG SOPS_VERSION=3.13.3
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) sha256=927c45f2ccb5b1c9acb1e80c7befaea0672c721fd3f222697a51e0a7081e3f3b ;; \
+      arm64) sha256=21cf1ee8860bb9c2a0b09ac97901b41ca9f95734f3402ea358e31e296e6be823 ;; \
+      *) echo "unsupported architecture for sops: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    deb="sops_${SOPS_VERSION}_$(dpkg --print-architecture).deb"; \
+    curl -fsSL --proto '=https' -o "/tmp/${deb}" \
+      "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/${deb}"; \
+    echo "${sha256}  /tmp/${deb}" | sha256sum -c -; \
+    dpkg -i "/tmp/${deb}"; \
+    rm -f "/tmp/${deb}"; \
+    sops --version
+
+# Prove sops and age work together: generate a throwaway age key, encrypt a
+# tiny YAML file, decrypt it, and require the plaintext back byte for byte.
+# The key and both files stay inside the temp dir removed by the trap.
+RUN set -eux; \
+    age --version; \
+    tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp"' EXIT; \
+    age-keygen -o "$tmp/age.key"; \
+    recipient="$(age-keygen -y "$tmp/age.key")"; \
+    printf 'value: smoke\n' > "$tmp/secret.yaml"; \
+    SOPS_AGE_KEY_FILE="$tmp/age.key" sops --encrypt --age "$recipient" \
+        --output "$tmp/secret.enc.yaml" "$tmp/secret.yaml"; \
+    SOPS_AGE_KEY_FILE="$tmp/age.key" sops --decrypt \
+        --output "$tmp/secret.dec.yaml" "$tmp/secret.enc.yaml"; \
+    cmp "$tmp/secret.yaml" "$tmp/secret.dec.yaml"; \
+    echo "sops smoke test: age round trip decrypted from a throwaway key"
 
 # The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
 RUN install -d -m 1777 /tmp/opencode
