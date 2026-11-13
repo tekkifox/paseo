@@ -40,7 +40,8 @@ RUN npm install -g html-validate@${HTML_VALIDATE_VERSION} && \
 
 RUN apt-get update && apt-get install -y \
         curl gpg unzip bzip2 python3 python3-venv make git \
-        jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget && \
+        jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget \
+        sshpass rsync python3-passlib python3-netaddr && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -166,6 +167,73 @@ RUN python3 -m venv /opt/oci-cli && \
     ln -sf /opt/oci-cli/bin/oci /usr/local/bin/oci
 
 RUN oci --version
+
+# Ansible drives the fleet hosts from inside this container. Debian 12 is
+# PEP 668-managed, so ansible-core and ansible-lint live in a pinned virtual
+# environment like the OCI CLI above, with their entry points symlinked into
+# /usr/local/bin for every user. The collections the fleet playbook uses are
+# pinned and installed below the venv, and ANSIBLE_COLLECTIONS_PATH makes them
+# visible to every ansible invocation in the image.
+ARG ANSIBLE_CORE_VERSION=2.19.9
+ARG ANSIBLE_LINT_VERSION=26.11.0
+ARG COMMUNITY_GENERAL_VERSION=14.0.1
+ARG COMMUNITY_DOCKER_VERSION=5.4.0
+ARG ANSIBLE_POSIX_VERSION=2.2.2
+RUN python3 -m venv /opt/ansible && \
+    /opt/ansible/bin/pip install --no-cache-dir --disable-pip-version-check \
+        ansible-core==${ANSIBLE_CORE_VERSION} \
+        ansible-lint==${ANSIBLE_LINT_VERSION} && \
+    for bin in ansible ansible-playbook ansible-vault ansible-galaxy ansible-doc ansible-inventory ansible-lint; do \
+        ln -sf "/opt/ansible/bin/${bin}" "/usr/local/bin/${bin}"; \
+    done
+
+ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
+
+RUN ansible-galaxy collection install -p "${ANSIBLE_COLLECTIONS_PATH}" \
+        "community.general:==${COMMUNITY_GENERAL_VERSION}" \
+        "community.docker:==${COMMUNITY_DOCKER_VERSION}" \
+        "ansible.posix:==${ANSIBLE_POSIX_VERSION}"
+
+# Prove the toolchain works before the image ships: the binaries resolve, the
+# pinned collections are visible, a playbook using one module from each
+# collection passes a real syntax check, and a vault encrypted file can be read
+# back without an interactive password prompt.
+RUN set -eux; \
+    ansible --version; \
+    ansible-lint --version; \
+    ansible-galaxy collection list; \
+    tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp"' EXIT; \
+    printf '%s\n' \
+        '---' \
+        '- name: ansible smoke' \
+        '  hosts: localhost' \
+        '  gather_facts: false' \
+        '  tasks:' \
+        '    - name: resolve an ansible.posix module' \
+        '      ansible.posix.sysctl:' \
+        '        name: kernel.sysrq' \
+        '        value: "1"' \
+        '        state: present' \
+        '    - name: resolve a community.general module' \
+        '      community.general.timezone:' \
+        '        name: UTC' \
+        '    - name: resolve a community.docker module' \
+        '      community.docker.docker_container:' \
+        '        name: ansible-smoke' \
+        '        state: absent' \
+        > "$tmp/playbook.yml"; \
+    ansible-playbook --syntax-check "$tmp/playbook.yml"; \
+    printf 'ansible-vault round trip\n' > "$tmp/plain.txt"; \
+    printf 'smoke-vault-password\n' > "$tmp/pass.txt"; \
+    ansible-vault encrypt --vault-password-file "$tmp/pass.txt" "$tmp/plain.txt"; \
+    if grep -q 'ansible-vault round trip' "$tmp/plain.txt"; then \
+        echo "ansible smoke test: encrypted file still contains plaintext" >&2; \
+        exit 1; \
+    fi; \
+    ansible-vault decrypt --vault-password-file "$tmp/pass.txt" "$tmp/plain.txt"; \
+    grep -qx 'ansible-vault round trip' "$tmp/plain.txt"; \
+    echo "ansible smoke test: syntax check and vault round trip passed"
 
 # Setup system-wide rules for GitHub connections
 RUN mkdir -p /etc/ssh && \
