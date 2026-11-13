@@ -41,7 +41,7 @@ RUN npm install -g html-validate@${HTML_VALIDATE_VERSION} && \
 RUN apt-get update && apt-get install -y \
         curl gpg unzip bzip2 python3 python3-venv make git \
         jq shellcheck yamllint python3-pip dnsutils iproute2 iputils-ping sqlite3 lsof wget \
-        sshpass rsync python3-passlib python3-netaddr && \
+        sshpass rsync python3-passlib python3-netaddr age && \
     mkdir -p -m 755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
@@ -179,6 +179,7 @@ ARG ANSIBLE_LINT_VERSION=26.11.0
 ARG COMMUNITY_GENERAL_VERSION=14.0.1
 ARG COMMUNITY_DOCKER_VERSION=5.4.0
 ARG ANSIBLE_POSIX_VERSION=2.2.2
+ARG COMMUNITY_SOPS_VERSION=2.5.1
 RUN python3 -m venv /opt/ansible && \
     /opt/ansible/bin/pip install --no-cache-dir --disable-pip-version-check \
         ansible-core==${ANSIBLE_CORE_VERSION} \
@@ -192,7 +193,8 @@ ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
 RUN ansible-galaxy collection install -p "${ANSIBLE_COLLECTIONS_PATH}" \
         "community.general:==${COMMUNITY_GENERAL_VERSION}" \
         "community.docker:==${COMMUNITY_DOCKER_VERSION}" \
-        "ansible.posix:==${ANSIBLE_POSIX_VERSION}"
+        "ansible.posix:==${ANSIBLE_POSIX_VERSION}" \
+        "community.sops:==${COMMUNITY_SOPS_VERSION}"
 
 # Prove the toolchain works before the image ships: the binaries resolve, the
 # pinned collections are visible, a playbook using one module from each
@@ -222,6 +224,10 @@ RUN set -eux; \
         '      community.docker.docker_container:' \
         '        name: ansible-smoke' \
         '        state: absent' \
+        '    - name: resolve a community.sops module' \
+        '      community.sops.sops_encrypt:' \
+        '        path: /tmp/ansible-sops-smoke.yaml' \
+        '        content: "value: smoke"' \
         > "$tmp/playbook.yml"; \
     ansible-playbook --syntax-check "$tmp/playbook.yml"; \
     printf 'ansible-vault round trip\n' > "$tmp/plain.txt"; \
@@ -479,6 +485,42 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/restic; \
     rm -f /tmp/restic.bz2; \
     restic version
+
+# sops encrypts the fleet's SOPS/age secrets. Install the pinned official
+# Debian package for both architectures the image builds; the release asset
+# names use the same amd64/arm64 spellings as dpkg, and the checksum is pinned
+# per architecture. dpkg -i is enough because the package has no dependencies.
+ARG SOPS_VERSION=3.13.3
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) sha256=927c45f2ccb5b1c9acb1e80c7befaea0672c721fd3f222697a51e0a7081e3f3b ;; \
+      arm64) sha256=21cf1ee8860bb9c2a0b09ac97901b41ca9f95734f3402ea358e31e296e6be823 ;; \
+      *) echo "unsupported architecture for sops: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    deb="sops_${SOPS_VERSION}_$(dpkg --print-architecture).deb"; \
+    curl -fsSL --proto '=https' -o "/tmp/${deb}" \
+      "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/${deb}"; \
+    echo "${sha256}  /tmp/${deb}" | sha256sum -c -; \
+    dpkg -i "/tmp/${deb}"; \
+    rm -f "/tmp/${deb}"; \
+    sops --version
+
+# Prove sops and age work together: generate a throwaway age key, encrypt a
+# tiny YAML file, decrypt it, and require the plaintext back byte for byte.
+# The key and both files stay inside the temp dir removed by the trap.
+RUN set -eux; \
+    age --version; \
+    tmp="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp"' EXIT; \
+    age-keygen -o "$tmp/age.key"; \
+    recipient="$(age-keygen -y "$tmp/age.key")"; \
+    printf 'value: smoke\n' > "$tmp/secret.yaml"; \
+    SOPS_AGE_KEY_FILE="$tmp/age.key" sops --encrypt --age "$recipient" \
+        --output "$tmp/secret.enc.yaml" "$tmp/secret.yaml"; \
+    SOPS_AGE_KEY_FILE="$tmp/age.key" sops --decrypt \
+        --output "$tmp/secret.dec.yaml" "$tmp/secret.enc.yaml"; \
+    cmp "$tmp/secret.yaml" "$tmp/secret.dec.yaml"; \
+    echo "sops smoke test: age round trip decrypted from a throwaway key"
 
 # The agent runtime uses /tmp/opencode for scratch files; the runtime user must be able to write there.
 RUN install -d -m 1777 /tmp/opencode
