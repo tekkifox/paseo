@@ -224,258 +224,42 @@ jobs:
       - name: Inspect image
         run: docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}"
 
+  # The fleet's stacks live as files in tekkifox/infrastructure-as-code and are
+  # applied by Ansible. Its deploy-stack.yml workflow does exactly what this job
+  # does, but that repository is private and this one is public, and GitHub
+  # does not let a public caller use a reusable workflow from a private
+  # repository. So the tailnet join and SSH call are inlined here; the deploy
+  # seat on mgmt remains the authority and validates the host and stack names.
+  # The seat's tailnet address is a secret (DEPLOY_SEAT_HOST), so no real
+  # hostname is published in this repository.
   deploy:
-    name: Redeploy Portainer stack
-    runs-on: ubuntu-latest
+    name: Deploy paseo
     needs: merge
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     steps:
-      # The stack file now comes from the commit the image was built from, so
-      # the deploy job needs the repository checked out too.
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-
-      # Portainer is only reachable over the tailnet. Join it on the hosted
-      # runner before the first Portainer API call.
+      # The seat is only reachable over the tailnet, so join it before the SSH
+      # call.
       - name: Join the tailnet
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: gh-paseo-${{ github.run_id }}
 
-      - name: Redeploy stack via Portainer API
-        shell: bash
+      - name: Ask the fleet deploy seat to deploy
         env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SEAT_HOST: ${{ secrets.DEPLOY_SEAT_HOST }}
+          TARGET_HOST: paseo
+          TARGET_STACKS: paseo-app
         run: |
           set -euo pipefail
 
-          compose_file="docker-compose.yml"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy"
+          chmod 0600 "$HOME/.ssh/deploy"
 
-          # --- Validate the repository compose before touching the stack ---
-          # The deploy publishes this file verbatim. A missing, empty or
-          # unrelated file must fail the step instead of pushing an empty or
-          # wrong stack definition to the host.
-          if [ ! -f "$compose_file" ]; then
-            echo "::error::Repository compose not found: ${compose_file} (expected at the repository root)"
-            exit 1
-          fi
-          if [ ! -s "$compose_file" ]; then
-            echo "::error::Repository compose is empty: ${compose_file}"
-            exit 1
-          fi
-
-          service_names=$(awk '
-            /^services:[[:space:]]*$/ { in_services = 1; next }
-            in_services && /^[^[:space:]#]/ { in_services = 0 }
-            in_services && /^  [A-Za-z0-9._-]+:[[:space:]]*$/ {
-              name = $1
-              sub(/:$/, "", name)
-              print name
-            }
-          ' "$compose_file")
-          if [ -z "$service_names" ]; then
-            echo "::error::Repository compose lists no services: ${compose_file}"
-            exit 1
-          fi
-          if ! printf '%s\n' "$service_names" | grep -qx 'paseo'; then
-            echo "::error::Repository compose has no 'paseo' service: ${compose_file}"
-            printf '%s\n' "$service_names"
-            exit 1
-          fi
-
-          compose_sha256=$(
-            { sha256sum "$compose_file" 2>/dev/null || shasum -a 256 "$compose_file"; } | awk '{print $1}'
-          )
-          if [ -z "$compose_sha256" ]; then
-            echo "::error::Could not hash ${compose_file} (no sha256sum or shasum available)"
-            exit 1
-          fi
-
-          echo "Publishing compose ${compose_file} ($(wc -c < "$compose_file" | tr -d '[:space:]') bytes, sha256 ${compose_sha256})"
-          echo "Compose services:"
-          printf '%s\n' "$service_names" | sed 's/^/  - /'
-
-          PORTAINER_URL="${PORTAINER_URL%/}"
-
-          # --- Find the stack by name (never hardcode Id/EndpointId) ---
-          stacks_response=$(curl -sS -k -w "\n%{http_code}" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            "${PORTAINER_URL}/api/stacks")
-          stacks_status=$(printf '%s\n' "$stacks_response" | tail -n 1)
-          stacks_body=$(printf '%s\n' "$stacks_response" | sed '$d')
-
-          if [ "$stacks_status" -lt 200 ] || [ "$stacks_status" -ge 300 ]; then
-            echo "Portainer GET /api/stacks failed with HTTP status ${stacks_status}"
-            printf '%s\n' "$stacks_body"
-            exit 1
-          fi
-
-          stack_id=$(printf '%s\n' "$stacks_body" | jq -r '[.[] | select(.Name == "paseo")][0].Id // empty')
-          endpoint_id=$(printf '%s\n' "$stacks_body" | jq -r '[.[] | select(.Name == "paseo")][0].EndpointId // empty')
-          env_array=$(printf '%s\n' "$stacks_body" | jq '[.[] | select(.Name == "paseo")][0].Env // []')
-
-          if [ -z "$stack_id" ] || [ "$stack_id" = "null" ]; then
-            echo "Portainer stack named 'paseo' not found in /api/stacks"
-            printf '%s\n' "$stacks_body"
-            exit 1
-          fi
-          if [ -z "$endpoint_id" ] || [ "$endpoint_id" = "null" ]; then
-            echo "Portainer stack 'paseo' has no EndpointId"
-            printf '%s\n' "$stacks_body"
-            exit 1
-          fi
-
-          echo "Found stack 'paseo': Id=${stack_id}, EndpointId=${endpoint_id}"
-
-          # --- Capture the currently running image id of paseo-big ---
-          get_paseo_big_image() {
-            local resp status body
-            resp=$(curl -sS -k -w "\n%{http_code}" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}" \
-              "${PORTAINER_URL}/api/endpoints/${endpoint_id}/docker/containers/json")
-            status=$(printf '%s\n' "$resp" | tail -n 1)
-            body=$(printf '%s\n' "$resp" | sed '$d')
-            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-              echo "Portainer GET /api/endpoints/${endpoint_id}/docker/containers/json failed with HTTP status ${status}" >&2
-              printf '%s\n' "$body" >&2
-              return 1
-            fi
-            printf '%s\n' "$body" | jq -r '[.[] | select((.Names // []) | any(. == "/paseo-big"))][0].ImageID // empty'
-          }
-
-          old_image=$(get_paseo_big_image)
-          if [ -z "$old_image" ]; then
-            echo "Could not find a running paseo-big container before redeploy"
-            exit 1
-          fi
-          echo "paseo-big currently running image: ${old_image}"
-
-          # --- Read the stack status (1 active, 2 inactive, 3 deploying, 4 error) ---
-          # Portainer runs a deployment in the background after PUT accepts it.
-          # A second PUT while Status is 3 is rejected with 409 "Stack
-          # deployment is already in progress", so wait for the status to leave
-          # 3 instead of failing or removing anything.
-          get_stack_status() {
-            local resp status body
-            resp=$(curl -sS -k -w "\n%{http_code}" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}" \
-              "${PORTAINER_URL}/api/stacks/${stack_id}")
-            status=$(printf '%s\n' "$resp" | tail -n 1)
-            body=$(printf '%s\n' "$resp" | sed '$d')
-            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-              echo "Portainer GET /api/stacks/${stack_id} failed with HTTP status ${status}" >&2
-              printf '%s\n' "$body" >&2
-              return 1
-            fi
-            printf '%s\n' "$body" | jq -r '.Status // empty'
-          }
-
-          # --- PUT the repository compose with the stack's existing Env and PullImage ---
-          # Only the file content changed: Env (including the secrets Portainer
-          # holds) still comes from the stack record read above, and
-          # PullImage keeps the newly pushed image in use.
-          body=$(jq -n \
-            --rawfile compose "$compose_file" \
-            --argjson env "$env_array" \
-            '{StackFileContent: $compose, Env: $env, PullImage: true}')
-
-          put_path="/api/stacks/${stack_id}?endpointId=${endpoint_id}"
-          put_url="${PORTAINER_URL}${put_path}"
-
-          # Bounded retry policy. 409 means "Portainer is still deploying": poll
-          # the stack status before retrying, sharing one wait budget across
-          # attempts so the whole step cannot hang. Other 5xx responses are
-          # treated as transient; other 4xx responses are not retried.
-          max_put_attempts=4
-          retry_backoff=10
-          stack_wait_seconds=120
-          stack_poll_interval=5
-          stack_wait_deadline=$((SECONDS + stack_wait_seconds))
-
-          put_attempt=0
-          put_status=""
-          put_body=""
-
-          while [ "$put_attempt" -lt "$max_put_attempts" ]; do
-            put_attempt=$((put_attempt + 1))
-            echo "Portainer PUT ${put_path} (attempt ${put_attempt} of ${max_put_attempts})"
-
-            put_response=$(curl -sS -k -w "\n%{http_code}" \
-              -X PUT "$put_url" \
-              -H "X-API-Key: ${PORTAINER_API_KEY}" \
-              -H "Content-Type: application/json" \
-              -d "$body")
-            put_status=$(printf '%s\n' "$put_response" | tail -n 1)
-            put_body=$(printf '%s\n' "$put_response" | sed '$d')
-
-            if [ "$put_status" -ge 200 ] && [ "$put_status" -lt 300 ]; then
-              echo "Portainer stack redeployed (PUT accepted on attempt ${put_attempt} of ${max_put_attempts})"
-              break
-            fi
-
-            echo "Portainer PUT ${put_path} failed on attempt ${put_attempt} of ${max_put_attempts} with HTTP status ${put_status}"
-            printf '%s\n' "$put_body"
-
-            if [ "$put_status" -ge 400 ] && [ "$put_status" -lt 500 ] && [ "$put_status" -ne 409 ]; then
-              echo "HTTP ${put_status} is not retryable; giving up"
-              break
-            fi
-
-            if [ "$put_status" -eq 409 ]; then
-              echo "Portainer reports a deployment is already in progress; polling GET /api/stacks/${stack_id} every ${stack_poll_interval}s until Status is no longer 3 (deploying), within a ${stack_wait_seconds}s wait budget"
-              while :; do
-                current_status=$(get_stack_status) || current_status=""
-                if [ -z "$current_status" ]; then
-                  echo "  stack status: <unavailable>"
-                else
-                  echo "  stack status: ${current_status}"
-                fi
-                if [ -n "$current_status" ] && [ "$current_status" != "3" ]; then
-                  echo "  stack is no longer deploying (Status ${current_status})"
-                  break
-                fi
-                if [ "$SECONDS" -ge "$stack_wait_deadline" ]; then
-                  echo "  stack wait budget of ${stack_wait_seconds}s exhausted; still deploying (Status ${current_status:-<unavailable>})"
-                  break
-                fi
-                sleep "$stack_poll_interval"
-              done
-            else
-              echo "Transient HTTP ${put_status}; will retry with backoff"
-            fi
-
-            if [ "$put_attempt" -ge "$max_put_attempts" ]; then
-              break
-            fi
-
-            echo "Waiting ${retry_backoff}s before the next PUT attempt"
-            sleep "$retry_backoff"
-            retry_backoff=$((retry_backoff * 2))
-          done
-
-          if [ "$put_status" -lt 200 ] || [ "$put_status" -ge 300 ]; then
-            echo "::error::Portainer stack redeploy failed after ${put_attempt} attempt(s): last PUT ${put_path} returned HTTP ${put_status}. The paseo-big container was left running; this workflow never deletes containers."
-            printf '%s\n' "$put_body"
-            exit 1
-          fi
-
-          # --- Poll for paseo-big to come back with a new image id ---
-          # A 2xx only means the deployment was accepted; give Portainer time to
-          # pull the new image and recreate the container.
-          overall_deadline=$((SECONDS + 180))
-          new_image=""
-          while [ "$SECONDS" -lt "$overall_deadline" ]; do
-            new_image=$(get_paseo_big_image) || true
-            if [ -n "$new_image" ] && [ "$new_image" != "$old_image" ]; then
-              echo "paseo-big now running image: ${new_image}"
-              exit 0
-            fi
-            sleep 5
-          done
-
-          echo "::error::Portainer accepted the PUT but paseo-big still runs image ${old_image} after 180s (last observed image: ${new_image:-<none>}). The paseo-big container was left running; this workflow never deletes containers."
-          exit 1
+          ssh -i "$HOME/.ssh/deploy" -p 32 \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            root@"$DEPLOY_SEAT_HOST" \
+            "fleet-deploy $TARGET_HOST $TARGET_STACKS deploy"

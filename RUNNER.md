@@ -132,13 +132,13 @@ This is an operational trap worth knowing:
 
 - GitHub does **not** fail a job when no matching self-hosted runner exists. The
   `Build (arm64)` job stays **Queued** indefinitely, and because `merge` needs
-  it, the merge job and the Portainer webhooks never run.
+  it, the merge job and the Ansible deploy never run.
 - `timeout-minutes` does **not** help here. GitHub starts that clock only when a
   runner picks the job up, not while it is queued. The workflow sets
   `timeout-minutes: 180` on each build to cancel a wedged build that has already
   started; it cannot fail a job with no runner.
 - The safe consequence is that the published tag is not rewritten: the old
-  multi-arch image remains live and Portainer is not notified. The bad
+  multi-arch image remains live and the fleet is not redeployed. The bad
   consequence is that the workflow silently stops updating the image.
 - Watch the Actions tab after enabling this workflow. A run stuck on
   `Build (arm64) — Queued` means the runner is missing, stopped, or has the
