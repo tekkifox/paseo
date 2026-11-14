@@ -54,6 +54,21 @@ durable home bind mount, not in the image. Only the `restic` binary ships here,
 in `/usr/local/bin`, so the script's `command -v restic` finds it without the
 hand-downloaded fallback.
 
+## Oracle SQL\*Plus
+
+The image includes Oracle SQL\*Plus (Instant Client Basic, version pinned with
+`ARG ORACLE_INSTANTCLIENT_VERSION` in the `Dockerfile`) under
+`/opt/oracle/instantclient`. The client directory is on `PATH` and its shared
+libraries are on `LD_LIBRARY_PATH`, so `sqlplus` runs directly inside the
+container against the Autonomous Database.
+
+No wallet or credential ships in the image. Mount the wallet at run time from
+the operator's vault and point `TNS_ADMIN` at it, for example:
+
+```sh
+sqlplus /@adb_high
+```
+
 ## DNS
 
 The service sets:
