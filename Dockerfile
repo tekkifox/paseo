@@ -168,6 +168,54 @@ RUN python3 -m venv /opt/oci-cli && \
 
 RUN oci --version
 
+# Oracle SQL*Plus connects the agent runtime to the fleet's Autonomous Database.
+# The Instant Client Basic and SQL*Plus packages live under /opt/oracle so a
+# future version bump replaces a pinned pair in one place, and the runtime home
+# bind mount cannot shadow them. Oracle's own architecture names (linux.x64 and
+# linux.arm64) differ from dpkg's, so BuildKit's TARGETARCH is mapped here; the
+# dpkg value is only a fallback for builders that do not set it. The download
+# directory is the version's major/minor/patch without separators followed by
+# three zeros (23.9.0 -> 2390000). libaio1 is SQL*Plus's only shared-library
+# dependency beyond libc, and the archives are deleted in the layer that
+# extracts them. No wallet or credential is baked in: the wallet is mounted at
+# run time from the operator's vault.
+ARG ORACLE_INSTANTCLIENT_VERSION=23.9.0.25.07
+ARG TARGETARCH
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libaio1; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64) oracle_arch=linux.x64 ;; \
+        arm64) oracle_arch=linux.arm64 ;; \
+        *) echo "Unsupported architecture for Oracle Instant Client: $arch" >&2; exit 1 ;; \
+    esac; \
+    version_dir="$(printf '%s' "${ORACLE_INSTANTCLIENT_VERSION}" | cut -d. -f1-3 | tr -d '.')000"; \
+    for package in basic sqlplus; do \
+        curl -fsSL --proto '=https' -o "/tmp/instantclient-${package}.zip" \
+            "https://download.oracle.com/otn_software/linux/instantclient/${version_dir}/instantclient-${package}-${oracle_arch}-${ORACLE_INSTANTCLIENT_VERSION}.zip"; \
+    done; \
+    install -d /opt/oracle; \
+    unzip -q -o /tmp/instantclient-basic.zip -d /opt/oracle; \
+    unzip -q -o /tmp/instantclient-sqlplus.zip -d /opt/oracle; \
+    client_dir="/opt/oracle/instantclient_$(printf '%s' "${ORACLE_INSTANTCLIENT_VERSION}" | cut -d. -f1)_$(printf '%s' "${ORACLE_INSTANTCLIENT_VERSION}" | cut -d. -f2)"; \
+    [ -d "$client_dir" ]; \
+    mv "$client_dir" /opt/oracle/instantclient; \
+    rm -f /tmp/instantclient-basic.zip /tmp/instantclient-sqlplus.zip
+
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient
+ENV PATH="/opt/oracle/instantclient:${PATH}"
+
+# Prove SQL*Plus starts before the image ships. The version string goes to
+# stderr, and matching the pinned version catches a stale download as well as a
+# missing libaio or a wrong-architecture build.
+RUN set -eux; \
+    sqlplus_version="$(sqlplus -V 2>&1)"; \
+    printf '%s\n' "$sqlplus_version"; \
+    printf '%s\n' "$sqlplus_version" | grep -F "Version ${ORACLE_INSTANTCLIENT_VERSION}"
+
 # Ansible drives the fleet hosts from inside this container. Debian 12 is
 # PEP 668-managed, so ansible-core and ansible-lint live in a pinned virtual
 # environment like the OCI CLI above, with their entry points symlinked into
